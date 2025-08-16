@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.env
+.env.local
+
+# Logs & temp
+logs/
+*.log
+*.sqlite3
+
+# Streamlit cache
+.streamlit/
+
+# Jupyter/Notebook
+.ipynb_checkpoints/
+
+# System files
+.DS_Store
+Thumbs.db

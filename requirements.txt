@@ -1,0 +1,12 @@
+streamlit
+flask
+requests
+pymysql
+plotly
+python-dotenv
+paytmchecksum
+razorpay
+pandas
+qrcode
+Pillow
+binance
