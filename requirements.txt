@@ -13,3 +13,4 @@ binance
 gunicorn
 pycryptodome
 cryptography
+aiohttp
