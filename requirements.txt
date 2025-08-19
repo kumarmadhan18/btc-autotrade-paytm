@@ -16,4 +16,3 @@ cryptography
 aiohttp
 python-binance
 bitcoinlib
-pkg-resources==0.0.0
