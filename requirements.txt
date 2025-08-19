@@ -1,18 +1,41 @@
+# Web UI
 streamlit
 flask
-requests
-pymysql
 plotly
 python-dotenv
+
+# Binance API
+python-binance
+
+# Bitcoin Wallet
+bitcoinlib
+
+# Database
+pymysql
+sqlalchemy
+
+# Payment Gateway
 paytmchecksum
 razorpay
-pandas
+
+# QR / Images
 qrcode
 Pillow
-binance
-gunicorn
-pycryptodome
-cryptography
+
+# Async & Networking
 aiohttp
-python-binance
-bitcoinlib
+requests
+
+# Security & Crypto
+cryptography
+pycryptodome
+
+# Data / Utils
+pandas
+
+# Production WSGI server (for Flask apps)
+gunicorn
+
+# Needed for pkg_resources
+setuptools
+
