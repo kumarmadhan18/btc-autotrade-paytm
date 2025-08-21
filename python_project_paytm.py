@@ -277,7 +277,7 @@ def send_telegram_alert(message):
 
 # Background monitor thread for Render downtime or 500 hour usage
 def start_background_monitor():
-    MONITOR_URL = os.getenv("RENDER_APP_URL", "https://localhost:8501/")
+    MONITOR_URL = os.getenv("RENDER_APP_URL", "https://btc-autotrade-paytm.onrender.com")
     CHECK_INTERVAL = 600  # 10 minutes
     HOURS_LIMIT = 500
     max_checks = int((HOURS_LIMIT * 3600) / CHECK_INTERVAL)
