@@ -36,6 +36,9 @@ load_dotenv()
 # BOT_TOKEN = "7828169838:AAGpO-3WSsFdjLWR8MnKY8HY6g6pNh5iDUg"
 # CHAT_ID = "7916754073"
 
+API_KEY = os.getenv("COINDCX_API_KEY", "")
+API_SECRET = os.getenv("COINDCX_API_SECRET", "")
+
 API_KEY = os.getenv("BINANCE_API_KEY", "")
 API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
