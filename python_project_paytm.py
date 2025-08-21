@@ -3,7 +3,8 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 import streamlit as st
-from binance.client import Client
+# from binance.client import Client
+from coindcx_api import get_market_price 
 import plotly.graph_objects as go
 import os
 import time
