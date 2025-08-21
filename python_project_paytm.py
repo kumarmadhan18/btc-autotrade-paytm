@@ -51,14 +51,13 @@ AUTO_REFRESH_INTERVAL = 15  # seconds
 # Telegram notifier embedded
 def get_mysql_connection():
      try:
-        conn = psycopg2.connect(
+        return psycopg2.connect(
             host=os.getenv("DB_HOST"),
             user=os.getenv("DB_USER"),
             password=os.getenv("DB_PASSWORD"),
             dbname=os.getenv("DB_NAME"),
             port=int(os.getenv("DB_PORT", 5432))
         )
-        return conn
     except psycopg2.Error as e:
         st.error(f"❌ PostgreSQL connection error: {e}")
         return None
