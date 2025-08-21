@@ -39,8 +39,8 @@ load_dotenv()
 API_KEY = os.getenv("COINDCX_API_KEY", "")
 API_SECRET = os.getenv("COINDCX_API_SECRET", "")
 
-API_KEY = os.getenv("BINANCE_API_KEY", "")
-API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+# API_KEY = os.getenv("BINANCE_API_KEY", "")
+# API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 

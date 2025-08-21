@@ -2,6 +2,7 @@
 from flask import Flask, request, jsonify
 from paytmchecksum import PaytmChecksum
 import pymysql
+import psycopg2
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -13,6 +14,19 @@ load_dotenv()
 PAYTM_MERCHANT_KEY = os.getenv("PAYTM_MERCHANT_KEY")
 
 def get_mysql_connection():
+    try:
+        return psycopg2.connect(
+            host=os.getenv("DB_HOST"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            dbname=os.getenv("DB_NAME"),
+            port=int(os.getenv("DB_PORT", 5432))
+        )
+    except psycopg2.Error as e:
+        st.error(f"❌ PostgreSQL connection error: {e}")
+        return None
+
+def get_mysql_connection_old():
     return pymysql.connect(
         host=os.getenv("MYSQL_HOST", "localhost"),
         user=os.getenv("MYSQL_USER", "root"),
