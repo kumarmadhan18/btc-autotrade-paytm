@@ -50,7 +50,7 @@ AUTO_REFRESH_INTERVAL = 15  # seconds
 
 # Telegram notifier embedded
 def get_mysql_connection():
-     try:
+    try:
         return psycopg2.connect(
             host=os.getenv("DB_HOST"),
             user=os.getenv("DB_USER"),
