@@ -13,6 +13,7 @@ bitcoinlib
 # Database
 pymysql
 sqlalchemy
+psycopg2-binary
 
 # Payment Gateway
 paytmchecksum

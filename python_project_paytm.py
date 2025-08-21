@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import os
 import time
 import pymysql
+import psycopg2
 from bitcoinlib.services.services import ServiceError
 from bitcoinlib.wallets import Wallet, WalletError
 import qrcode
@@ -49,6 +50,20 @@ AUTO_REFRESH_INTERVAL = 15  # seconds
 
 # Telegram notifier embedded
 def get_mysql_connection():
+     try:
+        conn = psycopg2.connect(
+            host=os.getenv("DB_HOST"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            dbname=os.getenv("DB_NAME"),
+            port=int(os.getenv("DB_PORT", 5432))
+        )
+        return conn
+    except psycopg2.Error as e:
+        st.error(f"❌ PostgreSQL connection error: {e}")
+        return None
+
+def get_mysql_connection_old():
     try:
         return pymysql.connect(
             host="localhost",
@@ -61,6 +76,188 @@ def get_mysql_connection():
     except pymysql.MySQLError as e:
         st.error(f"❌ MySQL connection error: {e}")
         return None
+
+def init_mysql_tables():
+    conn = get_mysql_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+
+    # inr_wallet_transactions
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS inr_wallet_transactions (
+        id SERIAL PRIMARY KEY,
+        trade_time TIMESTAMP,
+        action VARCHAR(50),
+        amount DOUBLE PRECISION,
+        balance_after DOUBLE PRECISION,
+        trade_mode VARCHAR(10) DEFAULT 'TEST',
+        payment_id VARCHAR(255),
+        status VARCHAR(20) NOT NULL,
+        reversal_id VARCHAR(50) NOT NULL,
+        razorpay_order_id VARCHAR(50) NOT NULL
+    )
+    """)
+
+    # live_trades
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS live_trades (
+        id SERIAL PRIMARY KEY,
+        trade_time TIMESTAMP,
+        order_id VARCHAR(50),
+        action VARCHAR(10),
+        amount DOUBLE PRECISION,
+        price DOUBLE PRECISION,
+        status VARCHAR(20),
+        profit DOUBLE PRECISION,
+        reason VARCHAR(50)
+    )
+    """)
+
+    # payout_logs
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS payout_logs (
+        id SERIAL PRIMARY KEY,
+        recipient_name VARCHAR(100),
+        method VARCHAR(10) CHECK (method IN ('bank','upi')),
+        fund_account_id VARCHAR(50),
+        amount NUMERIC(10,2),
+        status VARCHAR(50),
+        razorpay_payout_id VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # razorpay_payment_log
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS razorpay_payment_log (
+        id SERIAL PRIMARY KEY,
+        order_id VARCHAR(100),
+        customer_id VARCHAR(50),
+        name VARCHAR(50),
+        method VARCHAR(50),
+        account_number VARCHAR(50),
+        ifsc VARCHAR(50),
+        upi_id VARCHAR(50),
+        amount NUMERIC(10,2),
+        status VARCHAR(100),
+        response VARCHAR(100),
+        credited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        retry_count INT NOT NULL,
+        last_attempt_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # saved_recipients
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS saved_recipients (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100),
+        method VARCHAR(20),
+        account_number VARCHAR(50),
+        ifsc VARCHAR(20),
+        upi_id VARCHAR(50)
+    )
+    """)
+
+    # saved_upi_recipients
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS saved_upi_recipients (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100),
+        email VARCHAR(100),
+        phone VARCHAR(20),
+        upi_id VARCHAR(100),
+        contact_id VARCHAR(50),
+        fund_account_id VARCHAR(50)
+    )
+    """)
+
+    # user_wallets
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_wallets (
+        id SERIAL PRIMARY KEY,
+        user_email VARCHAR(100) NOT NULL,
+        inr_balance NUMERIC(10,2) DEFAULT 0.00,
+        customer_id VARCHAR(255) NOT NULL
+    )
+    """)
+
+    # wallet_history
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS wallet_history (
+        id SERIAL PRIMARY KEY,
+        trade_date DATE,
+        start_balance DOUBLE PRECISION,
+        end_balance DOUBLE PRECISION,
+        current_inr_value DOUBLE PRECISION,
+        trade_count INT,
+        auto_start_price DOUBLE PRECISION NOT NULL,
+        auto_end_price DOUBLE PRECISION,
+        auto_profit DOUBLE PRECISION NOT NULL,
+        total_deposit_inr DOUBLE PRECISION DEFAULT 0,
+        total_btc_received DOUBLE PRECISION DEFAULT 0,
+        total_btc_sent DOUBLE PRECISION DEFAULT 0,
+        profit_inr DOUBLE PRECISION DEFAULT 0
+    )
+    """)
+
+    # wallet_transactions
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS wallet_transactions (
+        id SERIAL PRIMARY KEY,
+        trade_time TIMESTAMP,
+        action VARCHAR(20),
+        amount DOUBLE PRECISION,
+        balance_after DOUBLE PRECISION,
+        inr_value DOUBLE PRECISION,
+        trade_type VARCHAR(200) DEFAULT 'MANUAL',
+        autotrade_active BOOLEAN DEFAULT FALSE,
+        status VARCHAR(20) NOT NULL,
+        reversal_id VARCHAR(50) NOT NULL,
+        is_autotrade_marker BOOLEAN DEFAULT FALSE,
+        last_price DOUBLE PRECISION DEFAULT 0
+    )
+    """)
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+    st.success("✅ PostgreSQL tables initialized successfully!")
+    
+init_mysql_tables()
+client = Client(API_KEY, API_SECRET)
+
+def get_btc_price():
+    try:
+        data = client.get_symbol_ticker(symbol="BTCUSDT")
+        return float(data['price'])
+    except Exception as e:
+        st.error(f"Price fetch failed: {e}")
+        return None
+
+def usd_to_inr(usd):
+    try:
+        response = requests.get("https://api.exchangerate-api.com/v4/latest/USD")
+        return usd * response.json()['rates']['INR']
+    except:
+        return usd * 83.0
+
+
+# --- Simulated/Real Wallet Balances ---
+
+def get_last_inr_balance():
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance_after FROM inr_wallet_transactions WHERE trade_mode = %s ORDER BY trade_time DESC LIMIT 1", 
+                   ("LIVE" if REAL_TRADING else "TEST",))
+    result = cursor.fetchone()
+    conn.close()
+    return float(result['balance_after']) if result else 10000.0
+
+INR_WALLET = {"balance": get_last_inr_balance()}
+# INR_WALLET =  {"balance": 10000.00}
+# INR_WALLET = {"balance": get_razorpay_balance()}
 
 
 def send_telegram_alert(message):
@@ -436,78 +633,6 @@ if 'AUTO_TRADE_STATE' not in st.session_state:
 # Initialize autotrade toggle state
 if 'autotrade_toggle' not in st.session_state:
     st.session_state.autotrade_toggle = False
-
-def init_mysql_tables():
-    conn = get_mysql_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS wallet_history (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        trade_date DATE,
-        start_balance DOUBLE,
-        end_balance DOUBLE,
-        current_inr_value DOUBLE,
-        trade_count INT,
-        auto_start_price DOUBLE,
-        auto_end_price DOUBLE,
-        auto_profit DOUBLE
-    )""")
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS wallet_transactions (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        trade_time DATETIME,
-        action VARCHAR(20),
-        amount DOUBLE,
-        balance_after DOUBLE,
-        inr_value DOUBLE,
-        trade_type VARCHAR(200) DEFAULT 'MANUAL',
-        autotrade_active BOOLEAN DEFAULT FALSE
-    )""")
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS inr_wallet_transactions (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        trade_time DATETIME,
-        action VARCHAR(50),
-        amount DOUBLE,
-        balance_after DOUBLE,
-        trade_mode VARCHAR(10) DEFAULT 'TEST'
-    )""")
-    conn.commit()
-    conn.close()
-
-init_mysql_tables()
-client = Client(API_KEY, API_SECRET)
-
-def get_btc_price():
-    try:
-        data = client.get_symbol_ticker(symbol="BTCUSDT")
-        return float(data['price'])
-    except Exception as e:
-        st.error(f"Price fetch failed: {e}")
-        return None
-
-def usd_to_inr(usd):
-    try:
-        response = requests.get("https://api.exchangerate-api.com/v4/latest/USD")
-        return usd * response.json()['rates']['INR']
-    except:
-        return usd * 83.0
-
-
-# --- Simulated/Real Wallet Balances ---
-
-def get_last_inr_balance():
-    conn = get_mysql_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT balance_after FROM inr_wallet_transactions WHERE trade_mode = %s ORDER BY trade_time DESC LIMIT 1", 
-                   ("LIVE" if REAL_TRADING else "TEST",))
-    result = cursor.fetchone()
-    conn.close()
-    return float(result['balance_after']) if result else 10000.0
-
-INR_WALLET = {"balance": get_last_inr_balance()}
-# INR_WALLET =  {"balance": 10000.00}
-# INR_WALLET = {"balance": get_razorpay_balance()}
 
 def log_inr_transaction(action, amount, balance_after, mode):
     try:
