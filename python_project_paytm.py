@@ -694,7 +694,7 @@ def update_wallet_daily_summary(start=False, auto_end=False):
     
     if start:
         cursor.execute("""
-            INSERT IGNORE INTO wallet_history 
+            INSERT INTO wallet_history 
             (trade_date, start_balance, end_balance, current_inr_value, trade_count, auto_start_price)
             VALUES (%s, %s, %s, %s, %s, %s)
         """, (today, BTC_WALLET['balance'], BTC_WALLET['balance'], BTC_WALLET['balance'] * inr_price, 0, inr_price))
