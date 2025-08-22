@@ -39,6 +39,7 @@ load_dotenv()
 
 API_KEY = os.getenv("COINDCX_API_KEY", "")
 API_SECRET = os.getenv("COINDCX_API_SECRET", "")
+BASE_URL = "https://api.coindcx.com"
 
 # API_KEY = os.getenv("BINANCE_API_KEY", "")
 # API_SECRET = os.getenv("BINANCE_API_SECRET", "")
@@ -52,6 +53,7 @@ REAL_TRADING = False
 ENABLE_NOTIFICATIONS = True
 AUTO_REFRESH_INTERVAL = 15  # seconds
 
+
 # Telegram notifier embedded
 def get_mysql_connection():
     try:
@@ -64,6 +66,15 @@ def get_mysql_connection():
         )
     except psycopg2.Error as e:
         st.error(f"❌ PostgreSQL connection error: {e}")
+        return None
+def get_market_price(symbol="BTCINR"):
+    try:
+        res = requests.get(f"{BASE_URL}/exchange/ticker")
+        data = res.json()
+        for ticker in data:
+            if ticker["market"] == symbol:
+                return float(ticker["last_price"])
+    except Exception as e:
         return None
 
 def get_mysql_connection_old():
@@ -229,11 +240,16 @@ def init_mysql_tables():
     st.success("✅ PostgreSQL tables initialized successfully!")
     
 init_mysql_tables()
-client = Client(API_KEY, API_SECRET)
+# client = Client(API_KEY, API_SECRET)
+# client.get_symbol_ticker(symbol="BTCUSDT")
+# client.get_account()
+# client.order_market_buy(...)
+# client.order_market_sell(...)
 
 def get_btc_price():
     try:
-        data = client.get_symbol_ticker(symbol="BTCUSDT")
+        # data = client.get_symbol_ticker(symbol="BTCUSDT")
+        data = get_market_price("BTCINR")
         return float(data['price'])
     except Exception as e:
         st.error(f"Price fetch failed: {e}")
@@ -1461,13 +1477,46 @@ else:
 st.write("### 📊 Live BTC Chart")
 
 @st.cache_data(ttl=300)
+
+def get_historical_klines(market="BTCINR", interval="1h", limit=168):
+    """
+    Fetch historical OHLCV data from CoinDCX
+    interval: "1m", "5m", "15m", "1h", "1d"
+    limit: number of candles
+    """
+    url = f"{BASE_URL}/exchange/v1/market_data/ohlc"
+    payload = {
+        "pair": market,
+        "interval": interval,
+        "limit": limit
+    }
+    try:
+        res = requests.post(url, json=payload)
+        data = res.json()
+        # Format into list of [time, open, high, low, close, volume]
+        ohlcv = []
+        for item in data[market]:
+            ohlcv.append([
+                datetime.fromtimestamp(item["time"]/1000),  # convert ms → datetime
+                float(item["open"]),
+                float(item["high"]),
+                float(item["low"]),
+                float(item["close"]),
+                float(item["volume"])
+            ])
+        return ohlcv
+    except Exception as e:
+        print("Error fetching OHLCV:", e)
+        return []
+
 def get_hourly_klines():
     try:
-        data = client.get_historical_klines(
-            "BTCUSDT",
-            Client.KLINE_INTERVAL_1HOUR,
-            "7 day ago UTC"
-        )
+        # data = client.get_historical_klines(
+        #     "BTCUSDT",
+        #     Client.KLINE_INTERVAL_1HOUR,
+        #     "7 day ago UTC"
+        # )
+        data = get_historical_klines("BTCINR", interval="1h", limit=168)  # last 7 days
         df = pd.DataFrame(data, columns=[
             "timestamp", "open", "high", "low", "close", "volume",
             "close_time", "quote_asset_volume", "number_of_trades",
