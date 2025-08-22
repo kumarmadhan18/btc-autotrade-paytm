@@ -67,6 +67,7 @@ def get_mysql_connection():
     except psycopg2.Error as e:
         st.error(f"❌ PostgreSQL connection error: {e}")
         return None
+    
 def get_market_price(symbol="BTCINR"):
     try:
         res = requests.get(f"{BASE_URL}/exchange/ticker")
@@ -76,7 +77,20 @@ def get_market_price(symbol="BTCINR"):
                 return float(ticker["last_price"])
     except Exception as e:
         return None
-
+    
+def cd_get_market_price(symbol: str = "BTCINR") -> float | None:
+    """Return last traded price as float from public ticker list."""
+    try:
+        r = requests.get(f"{BASE_URL}/exchange/ticker", timeout=10)
+        data = r.json()
+        for t in data:
+            if t.get("market") == symbol:
+                return float(t.get("last_price"))
+        return None
+    except Exception as e:
+        st.error(f"❌ Price fetch failed: {e}")
+        return None
+    
 def get_mysql_connection_old():
     try:
         return pymysql.connect(
@@ -1111,8 +1125,11 @@ def log_payout(order_id, name, method, acc, ifsc, upi, amount, status, response)
 
 # --- UI ---
 st.title("📱📊 Binance BTC Autotrade Pro")
-price = get_btc_price()
-price_inr = usd_to_inr(price) if price else 0
+# price = get_btc_price()
+# price_inr = usd_to_inr(price) if price else 0
+
+price = cd_get_market_price("BTCUSDT")
+price_inr = cd_get_market_price("BTCINR")
 update_wallet_daily_summary(start=True)
 
 st.metric("BTC/USDT", f"${price:,.2f}" if price else "N/A")
