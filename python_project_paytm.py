@@ -240,10 +240,10 @@ def init_mysql_tables():
         balance_after DOUBLE PRECISION DEFAULT 0,
         inr_value DOUBLE PRECISION DEFAULT 0,
         trade_type VARCHAR(200) DEFAULT 'MANUAL',
-        autotrade_active BOOLEAN DEFAULT FALSE,
+        autotrade_active INT(11) DEFAULT 0,
         status VARCHAR(20) DEFAULT 'PENDING',
         reversal_id VARCHAR(50) DEFAULT '',
-        is_autotrade_marker BOOLEAN DEFAULT FALSE,
+        is_autotrade_marker INT(11) DEFAULT 0,
         last_price DOUBLE PRECISION DEFAULT 0
     )
     """)
@@ -302,6 +302,8 @@ def migrate_postgres_tables():
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN inr_value SET DEFAULT 0;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN last_price SET DEFAULT 0;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN trade_time SET DEFAULT CURRENT_TIMESTAMP;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INT, ALTER COLUMN autotrade_active SET DEFAULT 0, ALTER COLUMN autotrade_active DROP NOT NULL;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
 
     conn.commit()
     cursor.close()
