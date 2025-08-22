@@ -681,7 +681,7 @@ def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUA
         INSERT INTO wallet_transactions 
         (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active)
         VALUES (NOW(), %s, %s, %s, %s, %s, %s)
-    """, (action, amount, balance, balance * price_inr, trade_type, st.session_state.AUTO_TRADING["active"]))
+    """, (action, amount, balance, balance * price_inr, trade_type, bool(st.session_state.AUTO_TRADING["active"]) if "AUTO_TRADING" in st.session_state else False))
     conn.commit()
     conn.close()
 
@@ -693,11 +693,25 @@ def update_wallet_daily_summary(start=False, auto_end=False):
     inr_price = usd_to_inr(price) if price else 0
     
     if start:
+        # cursor.execute("""
+        #     INSERT INTO wallet_history 
+        #     (trade_date, start_balance, end_balance, current_inr_value, trade_count, auto_start_price)
+        #     VALUES (%s, %s, %s, %s, %s, %s)
+        # """, (today, BTC_WALLET['balance'], BTC_WALLET['balance'], BTC_WALLET['balance'] * inr_price, 0, inr_price))
         cursor.execute("""
             INSERT INTO wallet_history 
-            (trade_date, start_balance, end_balance, current_inr_value, trade_count, auto_start_price)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (today, BTC_WALLET['balance'], BTC_WALLET['balance'], BTC_WALLET['balance'] * inr_price, 0, inr_price))
+            (trade_date, start_balance, end_balance, current_inr_value, trade_count, auto_start_price, auto_end_price, auto_profit)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            today,
+            BTC_WALLET['balance'],
+            BTC_WALLET['balance'],
+            BTC_WALLET['balance'] * inr_price,
+            0,
+            inr_price,
+            0,   # auto_end_price
+            0    # auto_profit
+        ))
     else:
         cursor.execute("SELECT COUNT(*) FROM wallet_transactions WHERE DATE(trade_time) = %s", (today,))
         count_row = cursor.fetchone()
