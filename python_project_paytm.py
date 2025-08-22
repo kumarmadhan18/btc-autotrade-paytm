@@ -240,7 +240,7 @@ def init_mysql_tables():
         balance_after DOUBLE PRECISION DEFAULT 0,
         inr_value DOUBLE PRECISION DEFAULT 0,
         trade_type VARCHAR(200) DEFAULT 'MANUAL',
-        autotrade_active INT(11) DEFAULT 0,
+        autotrade_active INT DEFAULT 0,
         status VARCHAR(20) DEFAULT 'PENDING',
         reversal_id VARCHAR(50) DEFAULT '',
         is_autotrade_marker INT(11) DEFAULT 0,
