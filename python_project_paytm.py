@@ -121,9 +121,9 @@ def init_mysql_tables():
         balance_after DOUBLE PRECISION,
         trade_mode VARCHAR(10) DEFAULT 'TEST',
         payment_id VARCHAR(255),
-        status VARCHAR(20) NOT NULL,
-        reversal_id VARCHAR(50) NOT NULL,
-        razorpay_order_id VARCHAR(50) NOT NULL
+        status VARCHAR(20) DEFAULT 'PENDING',
+        reversal_id VARCHAR(50) DEFAULT '',
+        razorpay_order_id VARCHAR(50) DEFAULT ''
     )
     """)
 
@@ -136,8 +136,8 @@ def init_mysql_tables():
         action VARCHAR(10),
         amount DOUBLE PRECISION,
         price DOUBLE PRECISION,
-        status VARCHAR(20),
-        profit DOUBLE PRECISION,
+        status VARCHAR(20) DEFAULT 'PENDING',
+        profit DOUBLE PRECISION DEFAULT 0,
         reason VARCHAR(50)
     )
     """)
@@ -149,8 +149,8 @@ def init_mysql_tables():
         recipient_name VARCHAR(100),
         method VARCHAR(10) CHECK (method IN ('bank','upi')),
         fund_account_id VARCHAR(50),
-        amount NUMERIC(10,2),
-        status VARCHAR(50),
+        amount NUMERIC(10,2) DEFAULT 0,
+        status VARCHAR(50) DEFAULT 'PENDING',
         razorpay_payout_id VARCHAR(50),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
@@ -167,11 +167,11 @@ def init_mysql_tables():
         account_number VARCHAR(50),
         ifsc VARCHAR(50),
         upi_id VARCHAR(50),
-        amount NUMERIC(10,2),
-        status VARCHAR(100),
+        amount NUMERIC(10,2) DEFAULT 0,
+        status VARCHAR(100) DEFAULT 'PENDING',
         response VARCHAR(100),
         credited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        retry_count INT NOT NULL,
+        retry_count INT DEFAULT 0,
         last_attempt_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
@@ -216,13 +216,13 @@ def init_mysql_tables():
     CREATE TABLE IF NOT EXISTS wallet_history (
         id SERIAL PRIMARY KEY,
         trade_date DATE,
-        start_balance DOUBLE PRECISION,
-        end_balance DOUBLE PRECISION,
-        current_inr_value DOUBLE PRECISION,
-        trade_count INT,
-        auto_start_price DOUBLE PRECISION NOT NULL,
-        auto_end_price DOUBLE PRECISION,
-        auto_profit DOUBLE PRECISION NOT NULL,
+        start_balance DOUBLE PRECISION DEFAULT 0,
+        end_balance DOUBLE PRECISION DEFAULT 0,
+        current_inr_value DOUBLE PRECISION DEFAULT 0,
+        trade_count INT DEFAULT 0,
+        auto_start_price DOUBLE PRECISION DEFAULT 0,
+        auto_end_price DOUBLE PRECISION DEFAULT 0,
+        auto_profit DOUBLE PRECISION DEFAULT 0,
         total_deposit_inr DOUBLE PRECISION DEFAULT 0,
         total_btc_received DOUBLE PRECISION DEFAULT 0,
         total_btc_sent DOUBLE PRECISION DEFAULT 0,
@@ -234,15 +234,15 @@ def init_mysql_tables():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS wallet_transactions (
         id SERIAL PRIMARY KEY,
-        trade_time TIMESTAMP,
+        trade_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         action VARCHAR(20),
-        amount DOUBLE PRECISION,
-        balance_after DOUBLE PRECISION,
-        inr_value DOUBLE PRECISION,
+        amount DOUBLE PRECISION DEFAULT 0,
+        balance_after DOUBLE PRECISION DEFAULT 0,
+        inr_value DOUBLE PRECISION DEFAULT 0,
         trade_type VARCHAR(200) DEFAULT 'MANUAL',
         autotrade_active BOOLEAN DEFAULT FALSE,
-        status VARCHAR(20) NOT NULL,
-        reversal_id VARCHAR(50) NOT NULL,
+        status VARCHAR(20) DEFAULT 'PENDING',
+        reversal_id VARCHAR(50) DEFAULT '',
         is_autotrade_marker BOOLEAN DEFAULT FALSE,
         last_price DOUBLE PRECISION DEFAULT 0
     )
@@ -254,6 +254,60 @@ def init_mysql_tables():
     st.success("✅ PostgreSQL tables initialized successfully!")
     
 init_mysql_tables()
+
+def migrate_postgres_tables():
+    conn = get_mysql_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+
+    # 🔹 inr_wallet_transactions
+    cursor.execute("ALTER TABLE inr_wallet_transactions ALTER COLUMN status SET DEFAULT 'PENDING';")
+    cursor.execute("ALTER TABLE inr_wallet_transactions ALTER COLUMN reversal_id SET DEFAULT '';")
+    cursor.execute("ALTER TABLE inr_wallet_transactions ALTER COLUMN razorpay_order_id SET DEFAULT '';")
+
+    # 🔹 live_trades
+    cursor.execute("ALTER TABLE live_trades ALTER COLUMN status SET DEFAULT 'PENDING';")
+    cursor.execute("ALTER TABLE live_trades ALTER COLUMN profit SET DEFAULT 0;")
+
+    # 🔹 payout_logs
+    cursor.execute("ALTER TABLE payout_logs ALTER COLUMN status SET DEFAULT 'PENDING';")
+    cursor.execute("ALTER TABLE payout_logs ALTER COLUMN amount SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE payout_logs ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP;")
+
+    # 🔹 razorpay_payment_log
+    cursor.execute("ALTER TABLE razorpay_payment_log ALTER COLUMN status SET DEFAULT 'PENDING';")
+    cursor.execute("ALTER TABLE razorpay_payment_log ALTER COLUMN amount SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE razorpay_payment_log ALTER COLUMN retry_count SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE razorpay_payment_log ALTER COLUMN last_attempt_time SET DEFAULT CURRENT_TIMESTAMP;")
+
+    # 🔹 wallet_history
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN start_balance SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN end_balance SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN current_inr_value SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN trade_count SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN auto_start_price SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN auto_end_price SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN auto_profit SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN total_deposit_inr SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN total_btc_received SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN total_btc_sent SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_history ALTER COLUMN profit_inr SET DEFAULT 0;")
+
+    # 🔹 wallet_transactions
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN status SET DEFAULT 'PENDING';")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN reversal_id SET DEFAULT '';")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN amount SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN balance_after SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN inr_value SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN last_price SET DEFAULT 0;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN trade_time SET DEFAULT CURRENT_TIMESTAMP;")
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+    st.success("✅ Migration completed! All tables updated with safe defaults.")
+
 # client = Client(API_KEY, API_SECRET)
 # client.get_symbol_ticker(symbol="BTCUSDT")
 # client.get_account()
