@@ -313,6 +313,7 @@ def migrate_postgres_tables():
 # client.get_account()
 # client.order_market_buy(...)
 # client.order_market_sell(...)
+migrate_postgres_tables()
 
 def get_btc_price():
     try:
