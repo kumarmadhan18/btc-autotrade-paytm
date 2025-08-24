@@ -305,7 +305,7 @@ def migrate_postgres_tables():
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE BOOLEAN USING autotrade_active::integer::boolean, ALTER COLUMN autotrade_active SET DEFAULT FALSE;")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INTEGER USING autotrade_active::integer, ALTER COLUMN autotrade_active SET DEFAULT 0;")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
-    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING autotrade_active::integer::boolean, ALTER COLUMN is_autotrade_maker SET DEFAULT FALSE;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING autotrade_active::integer::boolean, ALTER COLUMN is_autotrade_marker SET DEFAULT FALSE;")
     conn.commit()
     cursor.close()
     conn.close()
@@ -1047,7 +1047,7 @@ def check_auto_trading(price_inr):
         send_telegram(error_msg)
 
     # Auto-STOP logic if needed can go here...
-    # is_autotrade_maker changed into 1 to Ture
+    # is_autotrade_marker changed into 1 to Ture
 def get_last_auto_trade_price_from_db_old():
     conn = get_mysql_connection()
     cursor = conn.cursor()
@@ -1144,7 +1144,7 @@ def update_autotrade_status_db_old(status: int):
     finally:
         if conn:
             conn.close()
-            
+
 def update_autotrade_status_db(status: int):
     """Insert a marker row indicating auto-trade status (active/inactive)."""
     try:
