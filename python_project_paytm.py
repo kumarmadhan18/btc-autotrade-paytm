@@ -303,6 +303,7 @@ def migrate_postgres_tables():
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN last_price SET DEFAULT 0;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN trade_time SET DEFAULT CURRENT_TIMESTAMP;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INT, ALTER COLUMN autotrade_active SET DEFAULT 0, ALTER COLUMN autotrade_active DROP NOT NULL;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INTEGER USING (CASE WHEN autotrade_active THEN 1 ELSE 0 END), ALTER COLUMN autotrade_active SET DEFAULT 0;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
 
     conn.commit()
