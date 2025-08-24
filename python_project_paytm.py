@@ -243,7 +243,7 @@ def init_mysql_tables():
         autotrade_active INT DEFAULT 0,
         status VARCHAR(20) DEFAULT 'PENDING',
         reversal_id VARCHAR(50) DEFAULT '',
-        is_autotrade_marker INT(11) DEFAULT 0,
+        is_autotrade_marker INT DEFAULT 0,
         last_price DOUBLE PRECISION DEFAULT 0
     )
     """)
