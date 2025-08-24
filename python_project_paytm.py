@@ -240,10 +240,10 @@ def init_mysql_tables():
         balance_after DOUBLE PRECISION DEFAULT 0,
         inr_value DOUBLE PRECISION DEFAULT 0,
         trade_type VARCHAR(200) DEFAULT 'MANUAL',
-        autotrade_active INT DEFAULT 0,
+        autotrade_active BOOLEAN DEFAULT FALSE,
         status VARCHAR(20) DEFAULT 'PENDING',
         reversal_id VARCHAR(50) DEFAULT '',
-        is_autotrade_marker INT DEFAULT 0,
+        is_autotrade_marker BOOLEAN DEFAULT FALSE,
         last_price DOUBLE PRECISION DEFAULT 0
     )
     """)
@@ -302,10 +302,10 @@ def migrate_postgres_tables():
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN inr_value SET DEFAULT 0;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN last_price SET DEFAULT 0;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN trade_time SET DEFAULT CURRENT_TIMESTAMP;")
-    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE BOOLEAN USING autotrade_active::integer::boolean, ALTER COLUMN autotrade_active SET DEFAULT FALSE;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE BOOLEAN USING (autotrade_active::INTEGER <> 0);")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INTEGER USING autotrade_active::integer, ALTER COLUMN autotrade_active SET DEFAULT 0;")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
-    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING autotrade_active::integer::boolean, ALTER COLUMN is_autotrade_marker SET DEFAULT FALSE;")
+    cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING (is_autotrade_marker::INTEGER <> 0);")
     conn.commit()
     cursor.close()
     conn.close()
@@ -760,17 +760,18 @@ def log_wallet_transaction_old(action, amount, balance, price_inr, trade_type="M
 def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUAL"):
     conn = get_mysql_connection()
     cursor = conn.cursor()
-
-    autotrade_value = (
-        bool(st.session_state.AUTO_TRADING.get("active", False))
-        if "AUTO_TRADING" in st.session_state else False
-    )
-
     cursor.execute("""
-        INSERT INTO wallet_transactions 
+        INSERT INTO wallet_transactions
         (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active)
         VALUES (NOW(), %s, %s, %s, %s, %s, %s)
-    """, (action, amount, balance, balance * price_inr, trade_type, autotrade_value))
+    """, (
+        action,
+        amount,
+        balance,
+        balance * price_inr,
+        trade_type,
+        bool(st.session_state.get("AUTO_TRADING", {}).get("active", False))
+    ))
 
     conn.commit()
     conn.close()
@@ -816,7 +817,8 @@ def update_wallet_daily_summary(start=False, auto_end=False):
     if auto_end:
         cursor.execute("SELECT auto_start_price FROM wallet_history WHERE trade_date = %s", (today,))
         start_price_row = cursor.fetchone()
-        start_price = list(start_price_row.values())[ 0 ] if start_price_row else 0
+        # start_price = list(start_price_row.values())[0] if start_price_row else 0
+        start_price = start_price_row[0] if start_price_row else 0
         profit = BTC_WALLET['balance'] * (inr_price - start_price)
         cursor.execute("""
             UPDATE wallet_history 
@@ -888,7 +890,8 @@ def is_autotrade_active_from_db():
                 LIMIT 1
             """)
             row = cursor.fetchone()
-            return row is not None and row['trade_type'] == 'AUTO_TRADE_START'
+            # return row is not None and row['balance_after'] == 'AUTO_TRADE_START'
+            return (row is not None) and (row[0] == 'AUTO_TRADE_START')
     finally:
         conn.close()
 
@@ -915,7 +918,7 @@ def update_wallet_history_profit(profit, trade_date=None):
     cursor = conn.cursor()
     cursor.execute("""
         UPDATE wallet_history
-        SET auto_profit = IFNULL(auto_profit, 0) + %s
+        SET auto_profit = COALESCE(auto_profit, 0) + %s
         WHERE trade_date = %s
     """, (profit, trade_date))
     conn.commit()
@@ -1067,16 +1070,15 @@ def get_last_auto_trade_price_from_db():
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT balance_after
+        SELECT last_price
         FROM wallet_transactions
-        WHERE is_autotrade_marker = 1
+        WHERE is_autotrade_marker IN (TRUE, 1)
         ORDER BY trade_time DESC
         LIMIT 1
     """)
     result = cursor.fetchone()
     conn.close()
-
-    return float(result['balance_after']) if result and result['balance_after'] is not None else 0.0
+    return float(result[0]) if result and (result[0] is not None) else 0.0
 
 
 def update_last_auto_trade_price_db(price_inr):
@@ -1096,8 +1098,8 @@ def update_last_auto_trade_price_db(price_inr):
             0,                      # balance_after
             price_inr,             # inr_value
             "AUTO_TRADE",           # trade_type
-            1,                      # autotrade_active
-            Ture,                      # is_autotrade_marker
+            True,                      # autotrade_active
+            True,                      # is_autotrade_marker
             price_inr              # last_price
         ))
 
@@ -1164,7 +1166,7 @@ def update_autotrade_status_db(status: int):
             0,
             "AUTO_TRADE_START" if status else "AUTO_TRADE_STOP",  # ✅ better logging
             bool(status),   # ✅ matches BOOLEAN column
-            1
+            True
         ))
 
         conn.commit()
