@@ -746,7 +746,7 @@ def send_telegram(message):
         except Exception as e:
             st.error(f"Telegram failed: {e}")
 
-def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUAL"):
+def log_wallet_transaction_old(action, amount, balance, price_inr, trade_type="MANUAL"):
     conn = get_mysql_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -754,6 +754,24 @@ def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUA
         (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active)
         VALUES (NOW(), %s, %s, %s, %s, %s, %s)
     """, (action, amount, balance, balance * price_inr, trade_type, bool(st.session_state.AUTO_TRADING["active"]) if "AUTO_TRADING" in st.session_state else False))
+    conn.commit()
+    conn.close()
+
+def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUAL"):
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+
+    autotrade_value = (
+        bool(st.session_state.AUTO_TRADING.get("active", False))
+        if "AUTO_TRADING" in st.session_state else False
+    )
+
+    cursor.execute("""
+        INSERT INTO wallet_transactions 
+        (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active)
+        VALUES (NOW(), %s, %s, %s, %s, %s, %s)
+    """, (action, amount, balance, balance * price_inr, trade_type, autotrade_value))
+
     conn.commit()
     conn.close()
 
@@ -837,7 +855,7 @@ def save_trade_log(trade_type, btc_amount, btc_balance, price_inr, roi=0):
     df = pd.DataFrame([roi])
     df.to_csv(TRADE_LOG, mode='a', index=False, header=not os.path.exists(TRADE_LOG))
 
-def is_autotrade_active_from_db():
+def is_autotrade_active_from_db_old():
     """Checks the latest wallet transaction to determine if auto-trade is active"""
 
     conn = get_mysql_connection()
@@ -855,6 +873,24 @@ def is_autotrade_active_from_db():
             return row is not None and row['balance_after'] == 'AUTO_TRADE_START'
     finally:
         conn.close()
+
+def is_autotrade_active_from_db():
+    """Checks the latest wallet transaction to determine if auto-trade is active"""
+    conn = get_mysql_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT trade_type
+                FROM wallet_transactions
+                WHERE trade_type IN ('AUTO_TRADE_START', 'AUTO_TRADE_STOP')
+                ORDER BY trade_time DESC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+            return row is not None and row['trade_type'] == 'AUTO_TRADE_START'
+    finally:
+        conn.close()
+
 def get_latest_auto_start_price():
     conn = get_mysql_connection()
     cursor = conn.cursor()
@@ -1012,7 +1048,7 @@ def check_auto_trading(price_inr):
 
     # Auto-STOP logic if needed can go here...
     # is_autotrade_maker changed into 1 to Ture
-def get_last_auto_trade_price_from_db():
+def get_last_auto_trade_price_from_db_old():
     conn = get_mysql_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -1023,6 +1059,24 @@ def get_last_auto_trade_price_from_db():
     result = cursor.fetchone()
     conn.close()
     return float(result['balance_after']) if result and result['balance_after'] is not None else 0.0
+
+def get_last_auto_trade_price_from_db():
+    """Gets the last stored auto-trade price marker"""
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT balance_after
+        FROM wallet_transactions
+        WHERE is_autotrade_marker = 1
+        ORDER BY trade_time DESC
+        LIMIT 1
+    """)
+    result = cursor.fetchone()
+    conn.close()
+
+    return float(result['balance_after']) if result and result['balance_after'] is not None else 0.0
+
 
 def update_last_auto_trade_price_db(price_inr):
     """Insert a marker row with the latest auto-trade price."""
@@ -1058,7 +1112,7 @@ def update_last_auto_trade_price_db(price_inr):
         if conn:
             conn.close()
 
-def update_autotrade_status_db(status: int):
+def update_autotrade_status_db_old(status: int):
     """Insert a marker row indicating auto-trade status (active/inactive)."""
     try:
         conn = get_mysql_connection()
@@ -1076,6 +1130,39 @@ def update_autotrade_status_db(status: int):
             0,                      # inr_value
             "AUTO_TRADE",           # trade_type
             status,                 # autotrade_active
+            1                       # is_autotrade_marker
+        ))
+
+        conn.commit()
+        print(f"✅ Auto-trade status updated to: {'Active' if status else 'Inactive'}")
+
+    except Exception as e:
+        st.error(f"❌ Failed to update auto-trade status: {e}")
+        print("❌ DB Error (autotrade status):", e)
+        raise
+
+    finally:
+        if conn:
+            conn.close()
+            
+def update_autotrade_status_db(status: int):
+    """Insert a marker row indicating auto-trade status (active/inactive)."""
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT INTO wallet_transactions 
+            (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, is_autotrade_marker)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            datetime.now(),         # trade_time
+            "AUTO_META",            # action
+            0,                      # amount
+            0,                      # balance_after
+            0,                      # inr_value
+            "AUTO_TRADE",           # trade_type
+            bool(status),           # autotrade_active (fix: ensure boolean type)
             1                       # is_autotrade_marker
         ))
 
