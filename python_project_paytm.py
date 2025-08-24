@@ -803,9 +803,10 @@ def update_wallet_daily_summary(start=False, auto_end=False):
             0    # auto_profit
         ))
     else:
-        cursor.execute("SELECT COUNT(*) FROM wallet_transactions WHERE DATE(trade_time) = %s", (today,))
+        cursor.execute("SELECT COUNT(*) FROM wallet_transactions WHERE DATE(trade_time) = CURRENT_DATE", (today,))
         count_row = cursor.fetchone()
-        count = list(count_row.values())[ 0 ] if count_row else 0
+    #     count = list(count_row.values())[0] if count_row else 0
+        count = count_row[0] if count_row else 0
         cursor.execute("""
             UPDATE wallet_history
             SET end_balance = %s, current_inr_value = %s, trade_count = %s
@@ -1156,14 +1157,14 @@ def update_autotrade_status_db(status: int):
             (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, is_autotrade_marker)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            datetime.now(),         # trade_time
-            "AUTO_META",            # action
-            0,                      # amount
-            0,                      # balance_after
-            0,                      # inr_value
-            "AUTO_TRADE",           # trade_type
-            bool(status),           # autotrade_active (fix: ensure boolean type)
-            1                       # is_autotrade_marker
+            datetime.now(), 
+            "AUTO_META",
+            0,
+            0,
+            0,
+            "AUTO_TRADE_START" if status else "AUTO_TRADE_STOP",  # ✅ better logging
+            bool(status),   # ✅ matches BOOLEAN column
+            1
         ))
 
         conn.commit()
@@ -1177,6 +1178,7 @@ def update_autotrade_status_db(status: int):
     finally:
         if conn:
             conn.close()
+
 
 def check_price_threshold(price):
     if price >= ALERT_THRESHOLD_UP:
