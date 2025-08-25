@@ -613,6 +613,7 @@ def get_latest_inr_balance():
     # return float(row['balance_after']) if row else 0.0
     # return float(row[0]) if row else 0.0
     return float(row['balance_after']) if row and row['balance_after'] is not None else 0.0
+    
 
 def generate_qr_code_old(data):
     qr = qrcode.QRCode(box_size=6, border=2)
@@ -945,19 +946,28 @@ def is_autotrade_active_from_db():
     finally:
         conn.close()
 
+# def get_latest_auto_start_price():
+#     conn = get_mysql_connection()
+#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+#     cursor.execute("""
+#         SELECT auto_start_price 
+#         FROM wallet_history 
+#         WHERE auto_start_price IS NOT NULL 
+#         ORDER BY trade_date DESC 
+#         LIMIT 1
+#     """)
+#     result = cursor.fetchone()
+#     conn.close()
+#     return float(result['balance_after']) if result else None
+
 def get_latest_auto_start_price():
     conn = get_mysql_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("""
-        SELECT auto_start_price 
-        FROM wallet_history 
-        WHERE auto_start_price IS NOT NULL 
-        ORDER BY trade_date DESC 
-        LIMIT 1
-    """)
-    result = cursor.fetchone()
+    c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    c.execute("SELECT auto_start_price FROM wallet_history ORDER BY trade_date DESC LIMIT 1")
+    result = c.fetchone()
     conn.close()
-    return float(result['balance_after']) if result else None
+    return float(result['auto_start_price']) if result and result['auto_start_price'] is not None else 0.0
+
 
 
 def update_wallet_history_profit(profit, trade_date=None):
