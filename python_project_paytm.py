@@ -396,7 +396,8 @@ def get_current_inr_balance():
     conn = get_mysql_connection(); c = conn.cursor()
     c.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
     row = c.fetchone(); conn.close()
-    return row['balance_after'] if row else 0.0
+    # return row['balance_after'] if row else 0.0
+    return row[0] if row else 0.0
 
 # app = Flask(__name__)
 
@@ -605,7 +606,8 @@ def get_latest_inr_balance():
     conn = get_mysql_connection(); c = conn.cursor()
     c.execute("SELECT balance_after FROM inr_wallet_transactions WHERE status='COMPLETED' ORDER BY trade_time DESC LIMIT 1")
     row = c.fetchone(); conn.close()
-    return float(row['balance_after']) if row else 0.0
+    # return float(row['balance_after']) if row else 0.0
+    return float(row[0]) if row else 0.0
 
 def generate_qr_code_old(data):
     qr = qrcode.QRCode(box_size=6, border=2)
@@ -619,7 +621,8 @@ def credit_inr_wallet(amount, payment_id):
     c.execute("SELECT COUNT(1) as cnt FROM inr_wallet_transactions WHERE payment_id=%s", (payment_id,))
     if c.fetchone()['cnt']>0: return conn.close()
     c.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
-    row = c.fetchone(); balance = row['balance_after'] if row else 0
+    # row = c.fetchone(); balance = row['balance_after'] if row else 0
+    row = c.fetchone(); balance = row[0] if row else 0
     new_balance = balance + amount
     c.execute("""
         INSERT INTO inr_wallet_transactions
