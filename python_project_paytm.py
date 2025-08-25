@@ -344,7 +344,8 @@ def get_last_inr_balance():
                    ("LIVE" if REAL_TRADING else "TEST",))
     result = cursor.fetchone()
     conn.close()
-    return float(result['balance_after']) if result else 10000.0
+    # return float(result['balance_after']) if result else 10000.0
+    return float(result[0]) if result else 10000.0
 
 INR_WALLET = {"balance": get_last_inr_balance()}
 # INR_WALLET =  {"balance": 10000.00}
@@ -891,7 +892,8 @@ def is_autotrade_active_from_db():
             """)
             row = cursor.fetchone()
             # return row is not None and row['balance_after'] == 'AUTO_TRADE_START'
-            return (row is not None) and (row[0] == 'AUTO_TRADE_START')
+            # return (row is not None) and (row[0] == 'AUTO_TRADE_START')
+            return row is not None and row[0] == 'AUTO_TRADE_START'
     finally:
         conn.close()
 
