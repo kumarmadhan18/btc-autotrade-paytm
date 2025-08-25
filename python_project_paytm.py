@@ -346,7 +346,8 @@ def get_last_inr_balance():
     result = cursor.fetchone()
     conn.close()
     # return float(result['balance_after']) if result else 10000.0
-    return float(result[0]) if result else 10000.0
+    return float(result['balance_after']) if result and result['balance_after'] is not None else 10000.0
+    # return float(result[0]) if result else 10000.0
 
 INR_WALLET = {"balance": get_last_inr_balance()}
 # INR_WALLET =  {"balance": 10000.00}
@@ -398,7 +399,8 @@ def get_current_inr_balance():
     c.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
     row = c.fetchone(); conn.close()
     # return row['balance_after'] if row else 0.0
-    return row[0] if row else 0.0
+    return row['balance_after'] if row and row['balance_after'] is not None else 0.0
+    # return row[0] if row else 0.0
 
 # app = Flask(__name__)
 
@@ -608,7 +610,8 @@ def get_latest_inr_balance():
     c.execute("SELECT balance_after FROM inr_wallet_transactions WHERE status='COMPLETED' ORDER BY trade_time DESC LIMIT 1")
     row = c.fetchone(); conn.close()
     # return float(row['balance_after']) if row else 0.0
-    return float(row[0]) if row else 0.0
+    # return float(row[0]) if row else 0.0
+    return row['balance_after'] if row and row['balance_after'] is not None else 0.0
 
 def generate_qr_code_old(data):
     qr = qrcode.QRCode(box_size=6, border=2)
@@ -623,7 +626,8 @@ def credit_inr_wallet(amount, payment_id):
     if c.fetchone()['cnt']>0: return conn.close()
     c.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
     # row = c.fetchone(); balance = row['balance_after'] if row else 0
-    row = c.fetchone(); balance = row[0] if row else 0
+    # row = c.fetchone(); balance = row[0] if row else 0
+    row = c.fetchone(); balance = row['balance_after'] if row and row['balance_after'] is not None else 0
     new_balance = balance + amount
     c.execute("""
         INSERT INTO inr_wallet_transactions
@@ -846,10 +850,11 @@ def update_wallet_daily_summary(start=False, auto_end=False):
             0    # auto_profit
         ))
     else:
-        cursor.execute("SELECT COUNT(*) FROM wallet_transactions WHERE DATE(trade_time) = CURRENT_DATE", (today,))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM wallet_transactions WHERE DATE(trade_time) = CURRENT_DATE", (today,))
         count_row = cursor.fetchone()
     #     count = list(count_row.values())[0] if count_row else 0
-        count = count_row[0] if count_row else 0
+        # count = count_row[0] if count_row else 0
+        count = count_row['cnt'] if count_row else 0   # ✅ use dict key instead of [0]
         cursor.execute("""
             UPDATE wallet_history
             SET end_balance = %s, current_inr_value = %s, trade_count = %s
@@ -860,7 +865,8 @@ def update_wallet_daily_summary(start=False, auto_end=False):
         cursor.execute("SELECT auto_start_price FROM wallet_history WHERE trade_date = %s", (today,))
         start_price_row = cursor.fetchone()
         # start_price = list(start_price_row.values())[0] if start_price_row else 0
-        start_price = start_price_row[0] if start_price_row else 0
+        # start_price = start_price_row[0] if start_price_row else 0
+        start_price = start_price_row['auto_start_price'] if start_price_row and start_price_row['auto_start_price'] is not None else 0
         profit = BTC_WALLET['balance'] * (inr_price - start_price)
         cursor.execute("""
             UPDATE wallet_history 
@@ -932,9 +938,9 @@ def is_autotrade_active_from_db():
                 LIMIT 1
             """)
             row = cursor.fetchone()
-            # return row is not None and row['balance_after'] == 'AUTO_TRADE_START'
+            return row is not None and row['balance_after'] == 'AUTO_TRADE_START'
             # return (row is not None) and (row[0] == 'AUTO_TRADE_START')
-            return row is not None and row[0] == 'AUTO_TRADE_START'
+            # return row is not None and row[0] == 'AUTO_TRADE_START'
     finally:
         conn.close()
 
@@ -1134,7 +1140,8 @@ def get_autotrade_active_from_db() -> bool:
             LIMIT 1
         """)
         row = cursor.fetchone()
-        return bool(row[0]) if row else False
+        # return bool(row[0]) if row else False
+        return bool(row['autotrade_active']) if row else False
     finally:
         conn.close()
 
@@ -1153,7 +1160,8 @@ def get_last_auto_trade_price_from_db():
     """)
     result = cursor.fetchone()
     conn.close()
-    return float(result[0]) if result and (result[0] is not None) else 0.0
+    # return float(result[0]) if result and (result[0] is not None) else 0.0
+    return float(result['balance_after']) if result and (result['balance_after'] is not None) else 0.0
 
 
 def update_last_auto_trade_price_db(price_inr):
