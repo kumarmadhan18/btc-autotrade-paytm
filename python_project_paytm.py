@@ -399,7 +399,7 @@ def get_current_inr_balance():
     c.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
     row = c.fetchone(); conn.close()
     # return row['balance_after'] if row else 0.0
-    return row['balance_after'] if row and row['balance_after'] is not None else 0.0
+    return float(row['balance_after']) if row and row['balance_after'] is not None else 0.0
     # return row[0] if row else 0.0
 
 # app = Flask(__name__)
@@ -611,7 +611,7 @@ def get_latest_inr_balance():
     row = c.fetchone(); conn.close()
     # return float(row['balance_after']) if row else 0.0
     # return float(row[0]) if row else 0.0
-    return row['balance_after'] if row and row['balance_after'] is not None else 0.0
+    return float(row['balance_after']) if row and row['balance_after'] is not None else 0.0
 
 def generate_qr_code_old(data):
     qr = qrcode.QRCode(box_size=6, border=2)
