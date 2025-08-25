@@ -1669,9 +1669,19 @@ if st.button(f"{'🚀 Start' if not st.session_state.autotrade_toggle else '🛑
         })
         st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
         msg = f"🚀 Auto-Trade ACTIVATED at ₹{price_inr:.2f}"
+
+        # ✅ Log clean START marker
+        log_wallet_transaction("AUTO_START", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_START")
+        log_inr_transaction("AUTO_START", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
+        update_autotrade_status_db(1)
     else:
         update_wallet_daily_summary(auto_end=True)
         msg = f"🛑 Auto-Trade STOPPED at ₹{price_inr:.2f}"
+
+        # ✅ Log clean STOP marker
+        log_wallet_transaction("AUTO_STOP", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_STOP")
+        log_inr_transaction("AUTO_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
+        update_autotrade_status_db(0)
     
     st.toast(msg)
     send_telegram(msg)
