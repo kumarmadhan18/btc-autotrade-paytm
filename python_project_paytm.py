@@ -729,7 +729,7 @@ if 'AUTO_TRADE_STATE' not in st.session_state:
 if 'autotrade_toggle' not in st.session_state:
     st.session_state.autotrade_toggle = False
 
-def log_inr_transaction(action, amount, balance_after, mode):
+def log_inr_transaction_old(action, amount, balance_after, mode):
     try:
         conn = get_mysql_connection()
         with conn.cursor() as cursor:
@@ -742,6 +742,23 @@ def log_inr_transaction(action, amount, balance_after, mode):
         conn.close()
     except Exception as e:
         print(f"Error logging INR transaction: {e}")
+
+def log_inr_transaction(action, amount, balance, mode="TEST"):
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO inr_wallet_transactions 
+        (trade_time, action, amount, balance_after, trade_mode, status)
+        VALUES (NOW(), %s, %s, %s, %s, %s)
+    """, (
+        action,
+        amount,
+        balance,
+        mode,
+        "SUCCESS"   # ✅ explicitly set
+    ))
+    conn.commit()
+    conn.close()
 
 def send_telegram(message):
     if ENABLE_NOTIFICATIONS:
@@ -761,7 +778,7 @@ def log_wallet_transaction_old(action, amount, balance, price_inr, trade_type="M
     conn.commit()
     conn.close()
 
-def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUAL"):
+def log_wallet_transaction_25_08_2025(action, amount, balance, price_inr, trade_type="MANUAL"):
     conn = get_mysql_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -779,6 +796,26 @@ def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUA
 
     conn.commit()
     conn.close()
+
+def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUAL"):
+    conn = get_mysql_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO wallet_transactions 
+        (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, status)
+        VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        action,
+        amount,
+        balance,
+        balance * price_inr,
+        trade_type,
+        bool(st.session_state.get("AUTO_TRADING", {}).get("active", False)),
+        "SUCCESS"   # ✅ explicitly set
+    ))
+    conn.commit()
+    conn.close()
+
 
 def update_wallet_daily_summary(start=False, auto_end=False):
     conn = get_mysql_connection()
@@ -953,7 +990,8 @@ def check_auto_trading(price_inr):
         if (
             BTC_WALLET['balance'] == 0 and
             INR_WALLET['balance'] >= 20 and
-            st.session_state.AUTO_TRADE_STATE.get("last_price", 0) == 0
+            # st.session_state.AUTO_TRADE_STATE.get("last_price", 0) == 0
+            get_latest_auto_start_price() == 0   # ✅ check DB, not just session
         ):
             buy_amount_inr = INR_WALLET['balance'] * 0.5
             btc_bought = buy_amount_inr / price_inr
@@ -966,11 +1004,17 @@ def check_auto_trading(price_inr):
             st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
 
             update_last_auto_trade_price_db(price_inr)
+            update_autotrade_status_db(1)   # ✅ mark auto-trade active
 
             msg = f"🟢 Initial Auto-BUY ₹{buy_amount_inr:.2f} → {btc_bought:.6f} BTC at ₹{price_inr:.2f}"
             st.success(msg)
             st.toast(msg)
             send_telegram(msg)
+
+            # # --- Log AUTO_TRADE_START marker ---
+            # log_wallet_transaction("AUTO_START", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_START")
+            # log_inr_transaction("AUTO_START", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
+            # update_autotrade_status_db(1)   # ✅ mark as active in DB
 
             log_wallet_transaction("AUTO_BUY", btc_bought, BTC_WALLET['balance'], price_inr, "AUTO_INITIAL_BUY")
             log_inr_transaction("AUTO_BUY", -buy_amount_inr, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
@@ -1022,6 +1066,7 @@ def check_auto_trading(price_inr):
                     st.session_state.AUTO_TRADING["last_price"] = price_inr
                     st.session_state.AUTO_TRADING["sell_streak"] = 0
                     st.session_state.AUTO_TRADE_STATE["last_price"] = 0
+                    st.session_state.AUTO_TRADE_STATE["entry_price"] = 0
 
                     update_last_auto_trade_price_db(price_inr)
 
@@ -1034,6 +1079,7 @@ def check_auto_trading(price_inr):
                     log_inr_transaction("AUTO_SELL", inr_received, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
                     save_trade_log("AUTO_SELL", sell_btc, BTC_WALLET['balance'], price_inr, roi)
                 else:
+                    st.session_state.AUTO_TRADING["sell_streak"] += 1
                     st.info(f"⚠️ Auto-SELL skipped: ROI {roi:.2f}% < {min_roi}%")
 
         # --- Auto-disable after 3 failed sells ---
@@ -1042,9 +1088,14 @@ def check_auto_trading(price_inr):
             st.session_state["autotrade_toggle"] = False
             update_wallet_daily_summary(auto_end=True)
             update_autotrade_status_db(0)
+
             msg = "🛑 Auto-Trade auto-disabled after 3 losing trades"
             st.warning(msg)
             send_telegram(msg)
+
+            # ✅ Log STOP marker transaction explicitly
+            log_wallet_transaction("AUTO_STOP", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_STOP")
+            log_inr_transaction("AUTO_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
 
     except Exception as e:
         st.session_state.AUTO_TRADING["active"] = False
@@ -1068,6 +1119,24 @@ def get_last_auto_trade_price_from_db_old():
     result = cursor.fetchone()
     conn.close()
     return float(result['balance_after']) if result and result['balance_after'] is not None else 0.0
+
+def get_autotrade_active_from_db() -> bool:
+    """Check the latest marker row to determine if auto-trade is active."""
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT autotrade_active
+            FROM wallet_transactions
+            WHERE is_autotrade_marker = TRUE
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        return bool(row[0]) if row else False
+    finally:
+        conn.close()
+
 
 def get_last_auto_trade_price_from_db():
     """Gets the last stored auto-trade price marker"""
@@ -1161,7 +1230,7 @@ def update_autotrade_status_db(status: int):
 
         cursor.execute("""
             INSERT INTO wallet_transactions 
-            (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, is_autotrade_marker)
+            (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, is_autotrade_marker, status)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             datetime.now(), 
@@ -1171,7 +1240,8 @@ def update_autotrade_status_db(status: int):
             0,
             "AUTO_TRADE_START" if status else "AUTO_TRADE_STOP",  # ✅ better logging
             bool(status),   # ✅ matches BOOLEAN column
-            True
+            True,
+            "SUCCESS"   # ✅ explicitly set
         ))
 
         conn.commit()
@@ -1586,27 +1656,66 @@ with st.expander("📊 Wallet Daily Summary"):
 
 st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# --- Auto Trade Button ---
+# # --- Auto Trade Button ---
+# if st.button(f"{'🚀 Start' if not st.session_state.autotrade_toggle else '🛑 Stop'} Auto-Trade"):
+#     st.session_state.autotrade_toggle = not st.session_state.autotrade_toggle
+#     st.session_state.AUTO_TRADING["active"] = st.session_state.autotrade_toggle
+    
+#     if st.session_state.autotrade_toggle:
+#         # Initialize auto-trade
+#         st.session_state.AUTO_TRADING.update({
+#             "last_price": price_inr,
+#             "sell_streak": 0
+#         })
+#         st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
+#         msg = f"🚀 Auto-Trade ACTIVATED at ₹{price_inr:.2f}"
+#     else:
+#         update_wallet_daily_summary(auto_end=True)
+#         msg = f"🛑 Auto-Trade STOPPED at ₹{price_inr:.2f}"
+    
+#     st.toast(msg)
+#     send_telegram(msg)
+#     log_wallet_transaction("AUTO_TRADE_TOGGLE", 0, BTC_WALLET['balance'], price_inr, 
+#                          "AUTO_TRADE_START" if st.session_state.autotrade_toggle else "AUTO_TRADE_STOP")
+
 if st.button(f"{'🚀 Start' if not st.session_state.autotrade_toggle else '🛑 Stop'} Auto-Trade"):
+    # Flip toggle
     st.session_state.autotrade_toggle = not st.session_state.autotrade_toggle
     st.session_state.AUTO_TRADING["active"] = st.session_state.autotrade_toggle
     
     if st.session_state.autotrade_toggle:
-        # Initialize auto-trade
-        st.session_state.AUTO_TRADING.update({
-            "last_price": price_inr,
-            "sell_streak": 0
-        })
-        st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
-        msg = f"🚀 Auto-Trade ACTIVATED at ₹{price_inr:.2f}"
+        # --- START ---
+        if not get_autotrade_active_from_db():   # ✅ only insert if not already active
+            st.session_state.AUTO_TRADING.update({
+                "last_price": price_inr,
+                "sell_streak": 0
+            })
+            st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
+            msg = f"🚀 Auto-Trade ACTIVATED at ₹{price_inr:.2f}"
+            
+            # ✅ Log clean START marker
+            log_wallet_transaction("AUTO_START", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_START")
+            log_inr_transaction("AUTO_START", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
+            update_autotrade_status_db(1)
+        else:
+            msg = "⚠️ Auto-Trade is already active — ignoring duplicate START."
+
     else:
-        update_wallet_daily_summary(auto_end=True)
-        msg = f"🛑 Auto-Trade STOPPED at ₹{price_inr:.2f}"
-    
+        # --- STOP ---
+        if get_autotrade_active_from_db():   # ✅ only insert if currently active
+            update_wallet_daily_summary(auto_end=True)
+            msg = f"🛑 Auto-Trade STOPPED at ₹{price_inr:.2f}"
+            
+            # ✅ Log clean STOP marker
+            log_wallet_transaction("AUTO_STOP", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_STOP")
+            log_inr_transaction("AUTO_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
+            update_autotrade_status_db(0)
+        else:
+            msg = "⚠️ Auto-Trade is already stopped — ignoring duplicate STOP."
+
     st.toast(msg)
     send_telegram(msg)
-    log_wallet_transaction("AUTO_TRADE_TOGGLE", 0, BTC_WALLET['balance'], price_inr, 
-                         "AUTO_TRADE_START" if st.session_state.autotrade_toggle else "AUTO_TRADE_STOP")
+
 
 # --- BTC Wallet Address Display ---
 if REAL_TRADING:
