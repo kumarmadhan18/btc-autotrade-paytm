@@ -28,6 +28,7 @@ import hashlib
 import threading
 import uuid
 import json
+import traceback
 from paytmchecksum import PaytmChecksum
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
@@ -982,7 +983,7 @@ def check_auto_trading(price_inr):
 
         # --- Restore last trade price from DB if needed ---
         if st.session_state.AUTO_TRADING["last_price"] == 0:
-            db_last_price = get_latest_auto_start_price()
+            db_last_price = get_latest_auto_start_price() or 0  
             if db_last_price > 0:
                 st.session_state.AUTO_TRADING["last_price"] = db_last_price
                 st.info(f"📌 Restored last trade price ₹{db_last_price:.2f} from DB")
@@ -1091,13 +1092,18 @@ def check_auto_trading(price_inr):
             log_wallet_transaction("AUTO_STOP", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_STOP")
             log_inr_transaction("AUTO_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST", status="SUCCESS")
 
+    # except Exception as e:
+    #     st.session_state.AUTO_TRADING["active"] = False
+    #     st.session_state["autotrade_toggle"] = False
+    #     update_wallet_daily_summary(auto_end=True)
+    #     update_autotrade_status_db(0)
+    #     error_msg = f"❌ Auto-Trade stopped due to error: {str(e)}"
+    #     st.error(error_msg); send_telegram(error_msg)
     except Exception as e:
-        st.session_state.AUTO_TRADING["active"] = False
-        st.session_state["autotrade_toggle"] = False
-        update_wallet_daily_summary(auto_end=True)
-        update_autotrade_status_db(0)
-        error_msg = f"❌ Auto-Trade stopped due to error: {str(e)}"
-        st.error(error_msg); send_telegram(error_msg)
+        tb = traceback.format_exc()
+        st.error(f"❌ Auto-Trade stopped due to error: {e}")
+        st.text(tb)  # ✅ print full traceback in Streamlit
+        send_telegram(f"❌ Auto-Trade stopped due to error: {e}")
 
 
 def check_auto_trading_old(price_inr):
