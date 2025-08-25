@@ -1224,6 +1224,7 @@ def update_autotrade_status_db_old(status: int):
 
 def update_autotrade_status_db(status: int):
     """Insert a marker row indicating auto-trade status (active/inactive)."""
+    conn = None
     try:
         conn = get_mysql_connection()
         cursor = conn.cursor()
@@ -1231,7 +1232,7 @@ def update_autotrade_status_db(status: int):
         cursor.execute("""
             INSERT INTO wallet_transactions 
             (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, is_autotrade_marker, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             datetime.now(), 
             "AUTO_META",
