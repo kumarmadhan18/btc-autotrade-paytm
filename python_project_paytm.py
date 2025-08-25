@@ -10,6 +10,7 @@ import os
 import time
 import pymysql
 import psycopg2
+import psycopg2.extras
 from bitcoinlib.services.services import ServiceError
 from bitcoinlib.wallets import Wallet, WalletError
 import qrcode
@@ -109,7 +110,7 @@ def init_mysql_tables():
     conn = get_mysql_connection()
     if not conn:
         return
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     # inr_wallet_transactions
     cursor.execute("""
@@ -259,7 +260,7 @@ def migrate_postgres_tables():
     conn = get_mysql_connection()
     if not conn:
         return
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     # 🔹 inr_wallet_transactions
     cursor.execute("ALTER TABLE inr_wallet_transactions ALTER COLUMN status SET DEFAULT 'PENDING';")
@@ -339,7 +340,7 @@ def usd_to_inr(usd):
 
 def get_last_inr_balance():
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("SELECT balance_after FROM inr_wallet_transactions WHERE trade_mode = %s ORDER BY trade_time DESC LIMIT 1", 
                    ("LIVE" if REAL_TRADING else "TEST",))
     result = cursor.fetchone()
@@ -393,7 +394,7 @@ def start_background_monitor():
 start_background_monitor()
 
 def get_current_inr_balance():
-    conn = get_mysql_connection(); c = conn.cursor()
+    conn = get_mysql_connection(); c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     c.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
     row = c.fetchone(); conn.close()
     # return row['balance_after'] if row else 0.0
@@ -474,7 +475,7 @@ CUSTOMER_ID = os.getenv("CUSTOMER_ID", "")
 
 def save_bank_recipient(name, email, phone, ifsc, acc_number, contact_id, fund_account_id):
     with get_mysql_connection() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 INSERT INTO saved_recipients
                 (name, email, phone, ifsc, account_number, contact_id, fund_account_id)
@@ -484,7 +485,7 @@ def save_bank_recipient(name, email, phone, ifsc, acc_number, contact_id, fund_a
 
 def save_upi_recipient(name, email, phone, upi_id, contact_id, fund_account_id):
     with get_mysql_connection() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 INSERT INTO saved_upi_recipients
                 (name, email, phone, upi_id, contact_id, fund_account_id)
@@ -494,19 +495,19 @@ def save_upi_recipient(name, email, phone, upi_id, contact_id, fund_account_id):
 
 def load_saved_recipients():
     with get_mysql_connection() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT * FROM saved_recipients")
             return cur.fetchall()
 
 def load_saved_upi_recipients():
     with get_mysql_connection() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT * FROM saved_upi_recipients")
             return cur.fetchall()
 
 def log_payout(name, method, fund_account_id, amount, status, payout_id):
     with get_mysql_connection() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 INSERT INTO payout_logs
                 (recipient_name, method, fund_account_id, amount, status, razorpay_payout_id)
@@ -516,7 +517,7 @@ def log_payout(name, method, fund_account_id, amount, status, payout_id):
 
 
 def get_daily_wallet_summary():
-    conn = get_mysql_connection(); c = conn.cursor()
+    conn = get_mysql_connection(); c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     c.execute("""
         SELECT DATE(trade_time) as day,
             SUM(CASE WHEN action='DEPOSIT' THEN amount ELSE 0 END) AS deposits,
@@ -531,7 +532,7 @@ def get_daily_wallet_summary():
     return result
 
 def check_balance_health():
-    conn = get_mysql_connection(); c = conn.cursor()
+    conn = get_mysql_connection(); c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     
     # Get latest 2 balances
     c.execute("""
@@ -547,7 +548,7 @@ def check_balance_health():
             st.warning(f"⚠️ Sudden balance drop detected: ₹{diff:.2f}")
 
 def count_failed_refunds():
-    conn = get_mysql_connection(); c = conn.cursor()
+    conn = get_mysql_connection(); c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     c.execute("""
         SELECT COUNT(*) as failures FROM inr_wallet_transactions
         WHERE status='FAILED' AND action='DEPOSIT_FAILED'
@@ -586,7 +587,7 @@ def log_withdrawal_old(amount):
         return
 
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
     row = cursor.fetchone()
     current_balance = row['balance_after'] if row else 0
@@ -603,7 +604,7 @@ def log_withdrawal_old(amount):
 def get_latest_inr_balance():
     if not REAL_TRADING:
         return st.session_state.get("test_inr_balance", 5000.0)
-    conn = get_mysql_connection(); c = conn.cursor()
+    conn = get_mysql_connection(); c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     c.execute("SELECT balance_after FROM inr_wallet_transactions WHERE status='COMPLETED' ORDER BY trade_time DESC LIMIT 1")
     row = c.fetchone(); conn.close()
     # return float(row['balance_after']) if row else 0.0
@@ -617,7 +618,7 @@ def generate_qr_code_old(data):
     return buf.getvalue()
 
 def credit_inr_wallet(amount, payment_id):
-    conn = get_mysql_connection(); c = conn.cursor()
+    conn = get_mysql_connection(); c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     c.execute("SELECT COUNT(1) as cnt FROM inr_wallet_transactions WHERE payment_id=%s", (payment_id,))
     if c.fetchone()['cnt']>0: return conn.close()
     c.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
@@ -632,7 +633,7 @@ def credit_inr_wallet(amount, payment_id):
     conn.commit(); conn.close()
 
 def reverse_inr_wallet(amount, payment_id):
-    conn = get_mysql_connection(); c = conn.cursor()
+    conn = get_mysql_connection(); c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     c.execute("""
         INSERT INTO inr_wallet_transactions
         (trade_time,action,amount,balance_after,mode,payment_id,status)
@@ -656,7 +657,7 @@ def generate_qr_code(data: str):
 
 # def get_last_wallet_balance():
 #     conn = get_mysql_connection()
-#     cursor = conn.cursor()
+#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 #     cursor.execute("SELECT balance_after, trade_time FROM wallet_transactions ORDER BY trade_time DESC LIMIT 1")
 #     result = cursor.fetchone()
 #     conn.close()
@@ -681,7 +682,7 @@ def generate_qr_code(data: str):
 def get_last_wallet_balance():
     try:
         conn = get_mysql_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("SELECT balance_after, trade_time FROM wallet_transactions ORDER BY trade_time DESC LIMIT 1")
         result = cursor.fetchone()
         cursor.close()
@@ -732,7 +733,7 @@ if 'autotrade_toggle' not in st.session_state:
 def log_inr_transaction_old(action, amount, balance_after, mode):
     try:
         conn = get_mysql_connection()
-        with conn.cursor() as cursor:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute("""
                 INSERT INTO inr_wallet_transactions 
                 (trade_time, action, amount, balance_after, trade_mode)
@@ -745,7 +746,7 @@ def log_inr_transaction_old(action, amount, balance_after, mode):
 
 def log_inr_transaction(action, amount, balance, mode="TEST"):
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
         INSERT INTO inr_wallet_transactions 
         (trade_time, action, amount, balance_after, trade_mode, status)
@@ -769,7 +770,7 @@ def send_telegram(message):
 
 def log_wallet_transaction_old(action, amount, balance, price_inr, trade_type="MANUAL"):
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
         INSERT INTO wallet_transactions 
         (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active)
@@ -780,7 +781,7 @@ def log_wallet_transaction_old(action, amount, balance, price_inr, trade_type="M
 
 def log_wallet_transaction_25_08_2025(action, amount, balance, price_inr, trade_type="MANUAL"):
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
         INSERT INTO wallet_transactions
         (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active)
@@ -799,7 +800,7 @@ def log_wallet_transaction_25_08_2025(action, amount, balance, price_inr, trade_
 
 def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUAL"):
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
         INSERT INTO wallet_transactions 
         (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, status)
@@ -819,7 +820,7 @@ def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUA
 
 def update_wallet_daily_summary(start=False, auto_end=False):
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     today = datetime.now().strftime("%Y-%m-%d")
     price = get_btc_price()
     inr_price = usd_to_inr(price) if price else 0
@@ -905,7 +906,7 @@ def is_autotrade_active_from_db_old():
     conn = get_mysql_connection()
 
     try:
-        with conn.cursor() as cursor:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute("""
                 SELECT trade_type
                 FROM wallet_transactions
@@ -922,7 +923,7 @@ def is_autotrade_active_from_db():
     """Checks the latest wallet transaction to determine if auto-trade is active"""
     conn = get_mysql_connection()
     try:
-        with conn.cursor() as cursor:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute("""
                 SELECT trade_type
                 FROM wallet_transactions
@@ -939,7 +940,7 @@ def is_autotrade_active_from_db():
 
 def get_latest_auto_start_price():
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
         SELECT auto_start_price 
         FROM wallet_history 
@@ -957,7 +958,7 @@ def update_wallet_history_profit(profit, trade_date=None):
     if not trade_date:
         trade_date = datetime.now().strftime("%Y-%m-%d")
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
         UPDATE wallet_history
         SET auto_profit = COALESCE(auto_profit, 0) + %s
@@ -1110,7 +1111,7 @@ def check_auto_trading(price_inr):
     # is_autotrade_marker changed into 1 to Ture
 def get_last_auto_trade_price_from_db_old():
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
         SELECT last_price FROM wallet_transactions 
         WHERE is_autotrade_marker = TRUE
@@ -1124,7 +1125,7 @@ def get_autotrade_active_from_db() -> bool:
     """Check the latest marker row to determine if auto-trade is active."""
     conn = get_mysql_connection()
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("""
             SELECT autotrade_active
             FROM wallet_transactions
@@ -1141,7 +1142,7 @@ def get_autotrade_active_from_db() -> bool:
 def get_last_auto_trade_price_from_db():
     """Gets the last stored auto-trade price marker"""
     conn = get_mysql_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     cursor.execute("""
         SELECT last_price
@@ -1159,7 +1160,7 @@ def update_last_auto_trade_price_db(price_inr):
     """Insert a marker row with the latest auto-trade price."""
     try:
         conn = get_mysql_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         cursor.execute("""
             INSERT INTO wallet_transactions 
@@ -1193,7 +1194,7 @@ def update_autotrade_status_db_old(status: int):
     """Insert a marker row indicating auto-trade status (active/inactive)."""
     try:
         conn = get_mysql_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         cursor.execute("""
             INSERT INTO wallet_transactions 
@@ -1227,7 +1228,7 @@ def update_autotrade_status_db(status: int):
     conn = None
     try:
         conn = get_mysql_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         cursor.execute("""
             INSERT INTO wallet_transactions 
