@@ -308,6 +308,7 @@ def migrate_postgres_tables():
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INTEGER USING autotrade_active::integer, ALTER COLUMN autotrade_active SET DEFAULT 0;")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING (is_autotrade_marker::INTEGER <> 0);")
+    cursor.execute("TRUNCATE wallet_history;")
     conn.commit()
     cursor.close()
     conn.close()
@@ -1084,8 +1085,14 @@ def check_auto_trading(price_inr):
                     log_inr_transaction("AUTO_SELL", inr_received, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
                     save_trade_log("AUTO_SELL", sell_btc, BTC_WALLET['balance'], price_inr, roi)
                 else:
-                    st.session_state.AUTO_TRADING["sell_streak"] += 1
+                    # st.session_state.AUTO_TRADING["sell_streak"] += 1
                     st.info(f"⚠️ Auto-SELL skipped: ROI {roi:.2f}% < {min_roi}%")
+
+                     # 🔴 If ROI < 0 → Losing sell, increment streak
+                if roi < 0:
+                    st.session_state.AUTO_TRADING["sell_streak"] += 1
+                    st.info(f"⚠️ Losing Auto-SELL counted (streak={st.session_state.AUTO_TRADING['sell_streak']})")
+
 
         # --- Auto-disable after 3 failed sells ---
         if st.session_state.AUTO_TRADING["sell_streak"] >= 3:
