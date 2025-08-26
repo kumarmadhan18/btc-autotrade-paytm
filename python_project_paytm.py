@@ -1488,13 +1488,13 @@ def send_paytm_payout(token, order_id, amount, name, method, acc_no=None, ifsc=N
 # RECIPIENT STORAGE
 def get_all_recipients():
     with get_mysql_connection() as con:
-        with con.cursor() as cur:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT * FROM saved_recipients ORDER BY id DESC")
             return cur.fetchall()
 
 def save_recipient_if_new(name, method, acc, ifsc, upi):
     with get_mysql_connection() as con:
-        with con.cursor() as cur:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT id FROM saved_recipients WHERE method=%s AND (account_number=%s OR upi_id=%s)", (method, acc, upi))
             if not cur.fetchone():
                 cur.execute("""
@@ -1505,7 +1505,7 @@ def save_recipient_if_new(name, method, acc, ifsc, upi):
 
 def log_payout(order_id, name, method, acc, ifsc, upi, amount, status, response):
     with get_mysql_connection() as con:
-        with con.cursor() as cur:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 INSERT INTO razorpay_payment_logs
                 (order_id, customer_id, name, method, account_number, ifsc, upi_id, amount, status, response)
