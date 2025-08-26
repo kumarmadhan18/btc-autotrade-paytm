@@ -1444,7 +1444,7 @@ def check_auto_sell(price):
 
 def deduct_balance(amount):
     with get_mysql_connection() as con:
-        with con.cursor() as cur:
+        with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute (
                  "INSERT INTO user_wallets (user_email, inr_balance, customer_id) VALUES (%s, %s, %s)", ('testing@gmail.com', amount, CUSTOMER_ID)
                  )
@@ -1945,10 +1945,110 @@ else:
     st.info("No wallet transactions yet.")
 
 # --- Hourly Candlestick Chart ---
+# st.write("### 📊 Live BTC Chart")
+
+# @st.cache_data(ttl=300)
+
+# def get_historical_klines(market="BTCINR", interval="1h", limit=168):
+#     """
+#     Fetch historical OHLCV data from CoinDCX
+#     interval: "1m", "5m", "15m", "1h", "1d"
+#     limit: number of candles
+#     """
+#     url = f"{BASE_URL}/exchange/v1/market_data/ohlc"
+#     payload = {
+#         "pair": market,
+#         "interval": interval,
+#         "limit": limit
+#     }
+#     try:
+#         res = requests.post(url, json=payload)
+#         data = res.json()
+#         # Format into list of [time, open, high, low, close, volume]
+#         ohlcv = []
+#         for item in data[market]:
+#             ohlcv.append([
+#                 datetime.fromtimestamp(item["time"]/1000),  # convert ms → datetime
+#                 float(item["open"]),
+#                 float(item["high"]),
+#                 float(item["low"]),
+#                 float(item["close"]),
+#                 float(item["volume"])
+#             ])
+#         return ohlcv
+#     except Exception as e:
+#         print("Error fetching OHLCV:", e)
+#         return []
+
+# def get_hourly_klines():
+#     try:
+#         # data = client.get_historical_klines(
+#         #     "BTCUSDT",
+#         #     Client.KLINE_INTERVAL_1HOUR,
+#         #     "7 day ago UTC"
+#         # )
+#         data = get_historical_klines("BTCINR", interval="1h", limit=168)  # last 7 days
+#         df = pd.DataFrame(data, columns=[
+#             "timestamp", "open", "high", "low", "close", "volume",
+#             "close_time", "quote_asset_volume", "number_of_trades",
+#             "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
+#         ])
+#         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+#         df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+#         return df[["timestamp", "open", "high", "low", "close"]]
+#     except Exception as e:
+#         st.error(f"Error fetching data: {e}")
+#         return pd.DataFrame()
+
+# # Date selection
+# st.write("Select Date Range:")
+# date_col1, date_col2 = st.columns(2)
+# with date_col1:
+#     start_date = st.date_input("From", value=datetime.today() - timedelta(days=3))
+# with date_col2:
+#     end_date = st.date_input("To", value=datetime.today())
+
+# hist_df = get_hourly_klines()
+# if not hist_df.empty:
+#     filtered_df = hist_df[
+#         (hist_df['timestamp'].dt.date >= start_date) &
+#         (hist_df['timestamp'].dt.date <= end_date)
+#     ]
+    
+#     if filtered_df.empty:
+#         filtered_df = hist_df.tail(24)  # Show last 24 hours if empty
+    
+#     fig = go.Figure(go.Candlestick(
+#         x=filtered_df['timestamp'],
+#         open=filtered_df['open'],
+#         high=filtered_df['high'],
+#         low=filtered_df['low'],
+#         close=filtered_df['close'],
+#         increasing_line_color='green',
+#         decreasing_line_color='red'
+#     ))
+    
+#     fig.update_layout(
+#         xaxis_rangeslider_visible=True,
+#         margin=dict(l=20, r=20, t=20, b=20),
+#         height=400,
+#         xaxis=dict(
+#             rangeselector=dict(
+#                 buttons=list([
+#                     dict(count=12, label="12h", step="hour", stepmode="backward"),
+#                     dict(count=1, label="24h", step="day", stepmode="backward"),
+#                     dict(count=3, label="3d", step="day", stepmode="backward"),
+#                     dict(step="all")
+#                 ])
+#             )
+#         )
+#     )
+    
+#     st.plotly_chart(fig, use_container_width=True)
+
 st.write("### 📊 Live BTC Chart")
 
 @st.cache_data(ttl=300)
-
 def get_historical_klines(market="BTCINR", interval="1h", limit=168):
     """
     Fetch historical OHLCV data from CoinDCX
@@ -1964,11 +2064,10 @@ def get_historical_klines(market="BTCINR", interval="1h", limit=168):
     try:
         res = requests.post(url, json=payload)
         data = res.json()
-        # Format into list of [time, open, high, low, close, volume]
         ohlcv = []
         for item in data[market]:
             ohlcv.append([
-                datetime.fromtimestamp(item["time"]/1000),  # convert ms → datetime
+                datetime.fromtimestamp(item["time"] / 1000),  # ms → datetime
                 float(item["open"]),
                 float(item["high"]),
                 float(item["low"]),
@@ -1977,25 +2076,21 @@ def get_historical_klines(market="BTCINR", interval="1h", limit=168):
             ])
         return ohlcv
     except Exception as e:
-        print("Error fetching OHLCV:", e)
+        st.error(f"Error fetching OHLCV: {e}")
         return []
 
 def get_hourly_klines():
     try:
-        # data = client.get_historical_klines(
-        #     "BTCUSDT",
-        #     Client.KLINE_INTERVAL_1HOUR,
-        #     "7 day ago UTC"
-        # )
         data = get_historical_klines("BTCINR", interval="1h", limit=168)  # last 7 days
+        if not data:
+            return pd.DataFrame()
+
         df = pd.DataFrame(data, columns=[
-            "timestamp", "open", "high", "low", "close", "volume",
-            "close_time", "quote_asset_volume", "number_of_trades",
-            "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
+            "timestamp", "open", "high", "low", "close", "volume"
         ])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        # Already converted to datetime above, no unit="ms" needed
         df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
-        return df[["timestamp", "open", "high", "low", "close"]]
+        return df
     except Exception as e:
         st.error(f"Error fetching data: {e}")
         return pd.DataFrame()
@@ -2016,7 +2111,7 @@ if not hist_df.empty:
     ]
     
     if filtered_df.empty:
-        filtered_df = hist_df.tail(24)  # Show last 24 hours if empty
+        filtered_df = hist_df.tail(24)  # fallback to last 24h
     
     fig = go.Figure(go.Candlestick(
         x=filtered_df['timestamp'],
@@ -2045,6 +2140,8 @@ if not hist_df.empty:
     )
     
     st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("No data available for chart.")
 
 # --- rerun for auto-refresh ---
 time.sleep(10)
