@@ -1002,8 +1002,7 @@ def check_auto_trading(price_inr):
         if idle_minutes > 60:
             msg = f"⚠️ No auto-trade activity for {int(idle_minutes)} minutes. Please check system!"
             st.warning(msg); send_telegram(msg)
-            # reset timer so it doesn't spam
-            st.session_state.last_trade_time = datetime.now()
+            st.session_state.last_trade_time = datetime.now()  # ✅ reset after alert
 
         # --- Fetch last price from DB if not set in session ---
         if st.session_state.AUTO_TRADING["last_price"] == 0:
@@ -1017,11 +1016,12 @@ def check_auto_trading(price_inr):
                 st.info("📌 Initializing last price for auto-trading.")
                 return
 
-        # --- Force initial BUY ---
+        # --- Force initial BUY if BTC is 0 and INR is available ---
         if (
             BTC_WALLET['balance'] == 0 and
             INR_WALLET['balance'] >= 20 and
-            (get_latest_auto_start_price() or 0) == 0
+            not get_latest_auto_start_price() and          # ✅ FIX: only if no last price in DB
+            get_autotrade_active_from_db() == 0            # ✅ FIX: ensure not already active
         ):
             buy_amount_inr = INR_WALLET['balance'] * 0.5
             btc_bought = buy_amount_inr / price_inr
@@ -1032,8 +1032,9 @@ def check_auto_trading(price_inr):
             st.session_state.AUTO_TRADING["sell_streak"] = 0
             st.session_state.AUTO_TRADE_STATE["last_price"] = price_inr
             st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
-            st.session_state.last_trade_time = datetime.now()   # ✅ trade happened
+            st.session_state.last_trade_time = datetime.now()
 
+            # ✅ Mark as started in DB
             update_last_auto_trade_price_db(price_inr)
             update_autotrade_status_db(1)
 
@@ -1043,7 +1044,7 @@ def check_auto_trading(price_inr):
             log_wallet_transaction("AUTO_BUY", btc_bought, BTC_WALLET['balance'], price_inr, "AUTO_INITIAL_BUY")
             log_inr_transaction("AUTO_BUY", -buy_amount_inr, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
             save_trade_log("AUTO_BUY", btc_bought, BTC_WALLET['balance'], price_inr)
-            return
+            return  # ✅ important: stop further checks this cycle
 
         # --- Strategy params ---
         threshold = 5
@@ -1063,7 +1064,7 @@ def check_auto_trading(price_inr):
                     st.session_state.AUTO_TRADING["sell_streak"] = 0
                     st.session_state.AUTO_TRADE_STATE["last_price"] = price_inr
                     st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
-                    st.session_state.last_trade_time = datetime.now()   # ✅ trade happened
+                    st.session_state.last_trade_time = datetime.now()  # ✅ update on trade
 
                     update_last_auto_trade_price_db(price_inr)
 
@@ -1090,7 +1091,7 @@ def check_auto_trading(price_inr):
                     st.session_state.AUTO_TRADING["sell_streak"] = 0
                     st.session_state.AUTO_TRADE_STATE["last_price"] = 0
                     st.session_state.AUTO_TRADE_STATE["entry_price"] = 0
-                    st.session_state.last_trade_time = datetime.now()   # ✅ trade happened
+                    st.session_state.last_trade_time = datetime.now()  # ✅ update on trade
 
                     update_last_auto_trade_price_db(price_inr)
 
@@ -1708,25 +1709,23 @@ def log_payout(order_id, name, method, acc, ifsc, upi, amount, status, response)
             """, (order_id, CUSTOMER_ID, name, method, acc, ifsc, upi, amount, status, json.dumps(response)))
         con.commit()
 
-# def background_autotrade_loop():
-#     """Runs continuously in the background, checking DB flag & auto-trading."""
-#     while True:
-#         try:
-#             if get_autotrade_active_from_db():  # ✅ DB decides
-#                 price_inr = cd_get_market_price("BTCINR")
-#                 if price_inr:
-#                     check_auto_trading(price_inr)
-#             else:
-#                 time.sleep(5)  # short sleep if inactive
-#         except Exception as e:
-#             print("⚠️ Background auto-trade error:", str(e))
-#         time.sleep(AUTO_REFRESH_INTERVAL)  # e.g., 15 sec loop
+def background_autotrade_loop():
+    """Runs continuously in the background, checking DB flag & auto-trading."""
+    while True:
+        try:
+            if get_autotrade_active_from_db():  # ✅ DB decides
+                price_inr = cd_get_market_price("BTCINR")
+                if price_inr:
+                    check_auto_trading(price_inr)
+                else:
+                    # API failed → still run idle monitoring
+                    check_auto_trading(0)   # ✅ safe call for idle check
+            else:
+                time.sleep(5)  # short sleep if inactive
+        except Exception as e:
+            print("⚠️ Background auto-trade error:", str(e))
+        time.sleep(AUTO_REFRESH_INTERVAL)  # e.g., 15 sec loop
 
-# # Start background thread once
-# if "autotrade_thread_started" not in st.session_state:
-#     st.session_state.autotrade_thread_started = True
-#     t = threading.Thread(target=background_autotrade_loop, daemon=True)
-#     t.start()
 
 # --- UI ---
 st.title("📱📊 MM BTC Autotrade Pro BOT")
