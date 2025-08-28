@@ -1708,25 +1708,25 @@ def log_payout(order_id, name, method, acc, ifsc, upi, amount, status, response)
             """, (order_id, CUSTOMER_ID, name, method, acc, ifsc, upi, amount, status, json.dumps(response)))
         con.commit()
 
-def background_autotrade_loop():
-    """Runs continuously in the background, checking DB flag & auto-trading."""
-    while True:
-        try:
-            if get_autotrade_active_from_db():  # ✅ DB decides
-                price_inr = cd_get_market_price("BTCINR")
-                if price_inr:
-                    check_auto_trading(price_inr)
-            else:
-                time.sleep(5)  # short sleep if inactive
-        except Exception as e:
-            print("⚠️ Background auto-trade error:", str(e))
-        time.sleep(AUTO_REFRESH_INTERVAL)  # e.g., 15 sec loop
+# def background_autotrade_loop():
+#     """Runs continuously in the background, checking DB flag & auto-trading."""
+#     while True:
+#         try:
+#             if get_autotrade_active_from_db():  # ✅ DB decides
+#                 price_inr = cd_get_market_price("BTCINR")
+#                 if price_inr:
+#                     check_auto_trading(price_inr)
+#             else:
+#                 time.sleep(5)  # short sleep if inactive
+#         except Exception as e:
+#             print("⚠️ Background auto-trade error:", str(e))
+#         time.sleep(AUTO_REFRESH_INTERVAL)  # e.g., 15 sec loop
 
-# Start background thread once
-if "autotrade_thread_started" not in st.session_state:
-    st.session_state.autotrade_thread_started = True
-    t = threading.Thread(target=background_autotrade_loop, daemon=True)
-    t.start()
+# # Start background thread once
+# if "autotrade_thread_started" not in st.session_state:
+#     st.session_state.autotrade_thread_started = True
+#     t = threading.Thread(target=background_autotrade_loop, daemon=True)
+#     t.start()
 
 # --- UI ---
 st.title("📱📊 MM BTC Autotrade Pro BOT")
