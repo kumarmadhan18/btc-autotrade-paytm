@@ -309,10 +309,10 @@ def migrate_postgres_tables():
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INTEGER USING autotrade_active::integer, ALTER COLUMN autotrade_active SET DEFAULT 0;")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING (is_autotrade_marker::INTEGER <> 0);")
-    cursor.execute("TRUNCATE wallet_history;")
-    cursor.execute("TRUNCATE wallet_transactions;")
-    cursor.execute("TRUNCATE inr_wallet_transactions;")
-    cursor.execute("TRUNCATE user_wallets;")
+    # cursor.execute("TRUNCATE wallet_history;")
+    # cursor.execute("TRUNCATE wallet_transactions;")
+    # cursor.execute("TRUNCATE inr_wallet_transactions;")
+    # cursor.execute("TRUNCATE user_wallets;")
 
     conn.commit()
     cursor.close()
@@ -1861,48 +1861,27 @@ if st.button("🧾 Create Paytm Order"):
 
 
 # Code changed on 28-08-2025 for withdrawal button login
-# st.subheader("🏧 Withdraw to Bank / UPI")
+st.subheader("🏧 Withdraw to Bank / UPI")
 
-# recipients = get_all_recipients()
-# recipient_names = [f"{r['name']} ({r['method']})" for r in recipients]
-# selected = st.selectbox("📋 Saved Recipient", ["-- New Recipient --"] + recipient_names)
+recipients = get_all_recipients()
+recipient_names = [f"{r['name']} ({r['method']})" for r in recipients]
+selected = st.selectbox("📋 Saved Recipient", ["-- New Recipient --"] + recipient_names)
 
-# if selected != "-- New Recipient --":
-#     sel = recipients[recipient_names.index(selected) - 1]
-#     method = sel['method']
-#     name = sel['name']
-#     acc_no = sel['account_number']
-#     ifsc = sel['ifsc']
-#     upi = sel['upi_id']
-# else:
-#     method = st.radio("Payout Method", ["BANK", "UPI"])
-#     name = st.text_input("Recipient Name")
-#     acc_no = st.text_input("Account Number") if method == "BANK" else ""
-#     ifsc = st.text_input("IFSC Code") if method == "BANK" else ""
-#     upi = st.text_input("UPI ID") if method == "UPI" else ""
+if selected != "-- New Recipient --":
+    sel = recipients[recipient_names.index(selected) - 1]
+    method = sel['method']
+    name = sel['name']
+    acc_no = sel['account_number']
+    ifsc = sel['ifsc']
+    upi = sel['upi_id']
+else:
+    method = st.radio("Payout Method", ["BANK", "UPI"])
+    name = st.text_input("Recipient Name")
+    acc_no = st.text_input("Account Number") if method == "BANK" else ""
+    ifsc = st.text_input("IFSC Code") if method == "BANK" else ""
+    upi = st.text_input("UPI ID") if method == "UPI" else ""
 
-# payout_amt = st.number_input("Withdraw ₹", 100, step=100)
-
-# if st.button("🚀 Withdraw"):
-#     if method == "BANK" and (not acc_no or not ifsc):
-#         st.warning("❗ Please enter bank details.")
-#     elif method == "UPI" and not upi:
-#         st.warning("❗ Please enter UPI ID.")
-#     elif not name:
-#         st.warning("❗ Name is required.")
-#     else:
-#         save_recipient_if_new(name, method, acc_no, ifsc, upi)
-#         real_balance = get_current_inr_balance()
-
-#         if payout_amt > real_balance:
-#             st.error("❌ Insufficient balance")
-#         else:
-#             deduct_balance(payout_amt)
-#             st.session_state["inr_balance"] = get_current_inr_balance()
-#             send_telegram(f"✅ ₹{payout_amt:.2f} payout sent to {name} via {method}")
-#             st.success(f"✅ ₹{payout_amt:.2f} sent to {name}")
-
-# CODE CHANGES ENDED FOR WITHDRAWAL BUTTON LOGIC -----
+payout_amt = st.number_input("Withdraw ₹", 100, step=100)
 
 if st.button("🚀 Withdraw"):
     if method == "BANK" and (not acc_no or not ifsc):
@@ -1918,15 +1897,36 @@ if st.button("🚀 Withdraw"):
         if payout_amt > real_balance:
             st.error("❌ Insufficient balance")
         else:
-            # ✅ Deduct + Log with full details
-            deduct_balance(payout_amt, method, name, acc_no, ifsc, upi)
-
-            # ✅ Refresh session balance
+            deduct_balance(payout_amt)
             st.session_state["inr_balance"] = get_current_inr_balance()
-
-            # ✅ Notify
             send_telegram(f"✅ ₹{payout_amt:.2f} payout sent to {name} via {method}")
-            st.success(f"✅ ₹{payout_amt:.2f} sent to {name} via {method}")
+            st.success(f"✅ ₹{payout_amt:.2f} sent to {name}")
+
+# CODE CHANGES ENDED FOR WITHDRAWAL BUTTON LOGIC -----
+
+# if st.button("🚀 Withdraw"):
+#     if method == "BANK" and (not acc_no or not ifsc):
+#         st.warning("❗ Please enter bank details.")
+#     elif method == "UPI" and not upi:
+#         st.warning("❗ Please enter UPI ID.")
+#     elif not name:
+#         st.warning("❗ Name is required.")
+#     else:
+#         save_recipient_if_new(name, method, acc_no, ifsc, upi)
+#         real_balance = get_current_inr_balance()
+
+#         if payout_amt > real_balance:
+#             st.error("❌ Insufficient balance")
+#         else:
+#             # ✅ Deduct + Log with full details
+#             deduct_balance(payout_amt, method, name, acc_no, ifsc, upi)
+
+#             # ✅ Refresh session balance
+#             st.session_state["inr_balance"] = get_current_inr_balance()
+
+#             # ✅ Notify
+#             send_telegram(f"✅ ₹{payout_amt:.2f} payout sent to {name} via {method}")
+#             st.success(f"✅ ₹{payout_amt:.2f} sent to {name} via {method}")
 
 # # --- Show Current INR Wallet (for simulation) ---
 st.info(f"💼 Current INR Wallet Balance: ₹{st.session_state['inr_balance']:.2f}")
