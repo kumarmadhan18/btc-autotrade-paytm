@@ -990,13 +990,11 @@ def update_wallet_history_profit(profit, trade_date=None):
     conn.commit()
     conn.close()
 
-from datetime import datetime
-
 def get_last_trade_time_from_logs():
     """
     Get the most recent AUTO_* transaction time from wallet or INR logs.
     """
-    conn = get_mysql_connection()   # ✅ your existing DB connection helper
+    conn = get_mysql_connection()
     if not conn:
         return None
     cur = conn.cursor()
@@ -1013,16 +1011,23 @@ def get_last_trade_time_from_logs():
     conn.close()
 
     if row and row[0]:
-        return row[0]   # should already be datetime if TIMESTAMP
+        return row[0]
     return None
 
+# ------------------ AUTO TRADE FUNCTION ------------------
 
 def check_auto_trading(price_inr):
     """Profit-only auto-trading with auto-disable on errors (DB integrated + idle stop)."""
     try:
-        if not st.session_state.AUTO_TRADING["active"]:
-            st.info("🔒 Auto-trade is inactive. No action taken.")
+        # --- ✅ Always trust DB for active status ---
+        if not get_autotrade_active_from_db():
+            st.session_state.AUTO_TRADING["active"] = False
+            st.session_state["autotrade_toggle"] = False
+            st.info("🔒 Auto-trade is inactive (DB state). No action taken.")
             return
+        else:
+            st.session_state.AUTO_TRADING["active"] = True
+            st.session_state["autotrade_toggle"] = True
 
         # --- Idle Monitoring (stop if no trade > 60 mins) ---
         last_trade_time = get_last_trade_time_from_logs()
@@ -1880,7 +1885,6 @@ def log_payout(order_id, name, method, acc, ifsc, upi, amount, status, response)
             """, (order_id, CUSTOMER_ID, name, method, acc, ifsc, upi, amount, status, json.dumps(response)))
         con.commit()
 
-
 # def background_autotrade_loop():
 #     """Runs continuously in the background, checking DB flag & auto-trading."""
 #     while True:
@@ -1901,20 +1905,39 @@ def log_payout(order_id, name, method, acc, ifsc, upi, amount, status, response)
 AUTO_REFRESH_INTERVAL = 15  # seconds
 
 def background_autotrade_loop():
+    """Runs continuously in the background, checking DB flag & auto-trading + idle timeout."""
     while True:
         try:
-            if get_autotrade_active_from_db():
+            if get_autotrade_active_from_db():  # ✅ DB decides
+
+                # --- Idle Monitoring ---
+                last_trade_time = get_last_trade_time_from_logs()
+                if last_trade_time:
+                    idle_minutes = (datetime.now() - last_trade_time).total_seconds() / 60
+                    if idle_minutes > 60:
+                        update_wallet_daily_summary(auto_end=True)
+                        update_autotrade_status_db(0)
+
+                        msg = f"⏰ Auto-Trade auto-stopped after {idle_minutes:.0f} minutes of inactivity (background)"
+                        print(msg)
+                        send_telegram(msg)
+
+                        log_wallet_transaction("AUTO_IDLE_STOP", 0, BTC_WALLET['balance'], 0, "AUTO_IDLE_STOP")
+                        log_inr_transaction("AUTO_IDLE_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
+                        continue
+
+                # --- Run trade logic ---
                 price_inr = cd_get_market_price("BTCINR")
                 if price_inr:
                     check_auto_trading(price_inr)
-                else:
-                    check_auto_trading(0)
-                time.sleep(AUTO_REFRESH_INTERVAL)  # ✅ sleep only when active
+
             else:
-                time.sleep(5)  # ✅ faster polling when inactive
+                time.sleep(5)
+
         except Exception as e:
             print("⚠️ Background auto-trade error:", str(e))
-            time.sleep(10)  # ✅ short cool-off if error
+
+        time.sleep(AUTO_REFRESH_INTERVAL)  # e.g., 15 sec loop
 
 
 # --- UI ---
@@ -2254,9 +2277,34 @@ with st.expander("📊 Wallet Daily Summary"):
 st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # ✅ Start background thread only once (per dyno boot, not per browser refresh)
+# Restore state from DB on each refresh
+db_active = get_autotrade_active_from_db()
+
+if "AUTO_TRADING" not in st.session_state:
+    st.session_state.AUTO_TRADING = {"active": db_active, "last_price": 0, "sell_streak": 0}
+else:
+    st.session_state.AUTO_TRADING["active"] = db_active
+
+if "autotrade_toggle" not in st.session_state:
+    st.session_state.autotrade_toggle = bool(db_active)
+else:
+    st.session_state.autotrade_toggle = bool(db_active)
+
+# Idle warning toast if auto-stopped due to inactivity
+last_trade_time = get_last_trade_time_from_logs()
+if not db_active and last_trade_time:
+    idle_minutes = (datetime.now() - last_trade_time).total_seconds() / 60
+    if idle_minutes > 60:
+        msg = f"⏰ Auto-Trade was auto-stopped after {idle_minutes:.0f} minutes of inactivity"
+        st.warning(msg)
+        st.toast(msg)
+
+# ------------------ START BACKGROUND THREAD ------------------
+
 if "autotrade_thread_started" not in st.session_state:
     st.session_state.autotrade_thread_started = True
-    threading.Thread(target=background_autotrade_loop, daemon=True).start()
+    t = threading.Thread(target=background_autotrade_loop, daemon=True)
+    t.start()
 
 # --- Auto Trade Button ---
 autotrade_active = get_autotrade_active_from_db()
