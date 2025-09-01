@@ -2,6 +2,8 @@ import time
 from datetime import datetime
 from dotenv import load_dotenv
 import requests
+import threading
+from flask import Flask
 
 from python_project_paytm import (
     get_last_wallet_balance,
@@ -64,6 +66,20 @@ def background_autotrade_loop():
         time.sleep(AUTO_REFRESH_INTERVAL)
 
 
+# ----------------- Flask Wrapper for Render -----------------
+app = Flask(__name__)
+
+@app.route("/")
+def health():
+    return "🚀 Autotrade worker is running", 200
+
+
 if __name__ == "__main__":
     print("🚀 Autotrade worker started")
-    background_autotrade_loop()
+
+    # Start background loop in a separate thread
+    t = threading.Thread(target=background_autotrade_loop, daemon=True)
+    t.start()
+
+    # Keep Flask alive so Render detects an open port
+    app.run(host="0.0.0.0", port=10000)
