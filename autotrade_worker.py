@@ -45,8 +45,8 @@ def background_autotrade_loop():
                         send_telegram(msg)
 
                         # Use DB balances instead of cached ones
-                        btc_balance, _ = get_last_wallet_balance()
-                        inr_balance = get_last_inr_balance()
+                        btc_balance, _ = get_last_wallet_balance() or (0, 0)  # ✅ FIX: ensure tuple
+                        inr_balance = get_last_inr_balance() or 0             # ✅ FIX: ensure numeric
 
                         log_wallet_transaction("AUTO_IDLE_STOP", 0, btc_balance, 0, "AUTO_IDLE_STOP")
                         log_inr_transaction("AUTO_IDLE_STOP", 0, inr_balance, "LIVE" if REAL_TRADING else "TEST")
@@ -54,17 +54,20 @@ def background_autotrade_loop():
 
                 # --- Run trade logic ---
                 price_inr = cd_get_market_price("BTCINR")
-                if price_inr:
+                if price_inr is not None and price_inr > 0:   # ✅ FIX
                     check_auto_trading(price_inr)
+                else:
+                    print("⚠️ Background loop skipped: Invalid market price")
+                    send_telegram("⚠️ Background AutoTrade skipped: Invalid market price")
 
             else:
                 time.sleep(5)
 
         except Exception as e:
             print("⚠️ Background auto-trade error:", str(e))
+            send_telegram(f"⚠️ Background auto-trade error: {str(e)}")
 
         time.sleep(AUTO_REFRESH_INTERVAL)
-
 
 # ----------------- Flask Wrapper for Render -----------------
 app = Flask(__name__)
