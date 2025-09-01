@@ -1929,40 +1929,40 @@ def log_payout(order_id, name, method, acc, ifsc, upi, amount, status, response)
 
 AUTO_REFRESH_INTERVAL = 15  # seconds
 
-def background_autotrade_loop():
-    """Runs continuously in the background, checking DB flag & auto-trading + idle timeout."""
-    while True:
-        try:
-            if get_autotrade_active_from_db():  # ✅ DB decides
+# def background_autotrade_loop():
+#     """Runs continuously in the background, checking DB flag & auto-trading + idle timeout."""
+#     while True:
+#         try:
+#             if get_autotrade_active_from_db():  # ✅ DB decides
 
-                # --- Idle Monitoring ---
-                last_trade_time = get_last_trade_time_from_logs()
-                if last_trade_time:
-                    idle_minutes = (datetime.now() - last_trade_time).total_seconds() / 60
-                    if idle_minutes > 60:
-                        update_wallet_daily_summary(auto_end=True)
-                        update_autotrade_status_db(0)
+#                 # --- Idle Monitoring ---
+#                 last_trade_time = get_last_trade_time_from_logs()
+#                 if last_trade_time:
+#                     idle_minutes = (datetime.now() - last_trade_time).total_seconds() / 60
+#                     if idle_minutes > 60:
+#                         update_wallet_daily_summary(auto_end=True)
+#                         update_autotrade_status_db(0)
 
-                        msg = f"⏰ Auto-Trade auto-stopped after {idle_minutes:.0f} minutes of inactivity (background)"
-                        print(msg)
-                        send_telegram(msg)
+#                         msg = f"⏰ Auto-Trade auto-stopped after {idle_minutes:.0f} minutes of inactivity (background)"
+#                         print(msg)
+#                         send_telegram(msg)
 
-                        log_wallet_transaction("AUTO_IDLE_STOP", 0, BTC_WALLET['balance'], 0, "AUTO_IDLE_STOP")
-                        log_inr_transaction("AUTO_IDLE_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-                        continue
+#                         log_wallet_transaction("AUTO_IDLE_STOP", 0, BTC_WALLET['balance'], 0, "AUTO_IDLE_STOP")
+#                         log_inr_transaction("AUTO_IDLE_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
+#                         continue
 
-                # --- Run trade logic ---
-                price_inr = cd_get_market_price("BTCINR")
-                if price_inr:
-                    check_auto_trading(price_inr)
+#                 # --- Run trade logic ---
+#                 price_inr = cd_get_market_price("BTCINR")
+#                 if price_inr:
+#                     check_auto_trading(price_inr)
 
-            else:
-                time.sleep(5)
+#             else:
+#                 time.sleep(5)
 
-        except Exception as e:
-            print("⚠️ Background auto-trade error:", str(e))
+#         except Exception as e:
+#             print("⚠️ Background auto-trade error:", str(e))
 
-        time.sleep(AUTO_REFRESH_INTERVAL)  # e.g., 15 sec loop
+#         time.sleep(AUTO_REFRESH_INTERVAL)  # e.g., 15 sec loop
 
 
 # --- UI ---
@@ -2326,10 +2326,10 @@ if not db_active and last_trade_time:
 
 # ------------------ START BACKGROUND THREAD ------------------
 
-if "autotrade_thread_started" not in st.session_state:
-    st.session_state.autotrade_thread_started = True
-    t = threading.Thread(target=background_autotrade_loop, daemon=True)
-    t.start()
+# if "autotrade_thread_started" not in st.session_state:
+#     st.session_state.autotrade_thread_started = True
+#     t = threading.Thread(target=background_autotrade_loop, daemon=True)
+#     t.start()
 
 # --- Auto Trade Button ---
 autotrade_active = get_autotrade_active_from_db()

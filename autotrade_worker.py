@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 last_trade_time = time.time()
-
+REAL_TRADING = False
+ENABLE_NOTIFICATIONS = True
 # def background_autotrade_loop():
 #     global last_trade_time
 #     while True:
