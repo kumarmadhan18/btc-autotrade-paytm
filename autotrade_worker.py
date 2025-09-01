@@ -1,7 +1,6 @@
 import time
 from datetime import datetime
 from dotenv import load_dotenv
-import requests
 import threading
 from flask import Flask
 
@@ -16,7 +15,7 @@ from python_project_paytm import (
     update_wallet_daily_summary,
     update_autotrade_status_db,
     log_wallet_transaction,
-    log_inr_transaction
+    log_inr_transaction,
 )
 
 load_dotenv()
@@ -27,12 +26,13 @@ AUTO_REFRESH_INTERVAL = 15  # seconds
 
 
 def background_autotrade_loop():
-    """Runs continuously in the background, checking DB flag & auto-trading + idle timeout."""
+    """Persistent background auto-trade worker: DB-driven, idle-safe."""
     while True:
         try:
-            if get_autotrade_active_from_db():  # ✅ DB flag
+            autotrade_active = get_autotrade_active_from_db()
 
-                # --- Idle Monitoring ---
+            if autotrade_active:
+                # --- Idle Monitoring (stop if no trade > 60 mins) ---
                 last_trade_time = get_last_trade_time_from_logs()
                 if last_trade_time:
                     idle_minutes = (datetime.now() - last_trade_time).total_seconds() / 60
@@ -42,34 +42,44 @@ def background_autotrade_loop():
 
                         msg = f"⏰ Auto-Trade auto-stopped after {idle_minutes:.0f} minutes of inactivity (background)"
                         print(msg)
-                        send_telegram(msg)
+                        if ENABLE_NOTIFICATIONS:
+                            send_telegram(msg)
 
-                        # Use DB balances instead of cached ones
-                        btc_balance, _ = get_last_wallet_balance() or (0, 0)  # ✅ FIX: ensure tuple
-                        inr_balance = get_last_inr_balance() or 0             # ✅ FIX: ensure numeric
+                        # --- Fetch balances safely from DB ---
+                        btc_balance, _ = get_last_wallet_balance()
+                        btc_balance = btc_balance or 0.0
+
+                        inr_balance = get_last_inr_balance()
+                        if inr_balance is None:
+                            inr_balance = 10000.0 if not REAL_TRADING else 0.0
 
                         log_wallet_transaction("AUTO_IDLE_STOP", 0, btc_balance, 0, "AUTO_IDLE_STOP")
                         log_inr_transaction("AUTO_IDLE_STOP", 0, inr_balance, "LIVE" if REAL_TRADING else "TEST")
-                        continue
+                        continue  # Skip this loop cycle
 
-                # --- Run trade logic ---
+                # --- Fetch current BTC price and run trade logic ---
                 price_inr = cd_get_market_price("BTCINR")
-                if price_inr is not None and price_inr > 0:   # ✅ FIX
+                if price_inr is not None and price_inr > 0:
                     check_auto_trading(price_inr)
                 else:
                     print("⚠️ Background loop skipped: Invalid market price")
-                    send_telegram("⚠️ Background AutoTrade skipped: Invalid market price")
+                    if ENABLE_NOTIFICATIONS:
+                        send_telegram("⚠️ Background AutoTrade skipped: Invalid market price")
 
             else:
+                # Auto-trade inactive → short sleep
                 time.sleep(5)
 
         except Exception as e:
-            print("⚠️ Background auto-trade error:", str(e))
-            send_telegram(f"⚠️ Background auto-trade error: {str(e)}")
+            err_msg = f"⚠️ Background auto-trade error: {str(e)}"
+            print(err_msg)
+            if ENABLE_NOTIFICATIONS:
+                send_telegram(err_msg)
 
         time.sleep(AUTO_REFRESH_INTERVAL)
 
-# ----------------- Flask Wrapper for Render -----------------
+
+# ----------------- Flask Wrapper for Render / Persistent Worker -----------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -80,9 +90,9 @@ def health():
 if __name__ == "__main__":
     print("🚀 Autotrade worker started")
 
-    # Start background loop in a separate thread
+    # Start background loop in a separate daemon thread
     t = threading.Thread(target=background_autotrade_loop, daemon=True)
     t.start()
 
-    # Keep Flask alive so Render detects an open port
+    # Keep Flask alive so cloud host detects an open port
     app.run(host="0.0.0.0", port=10000)
