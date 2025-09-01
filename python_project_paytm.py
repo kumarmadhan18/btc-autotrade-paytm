@@ -691,6 +691,26 @@ def generate_qr_code(data: str):
 
 # BTC_WALLET = {"balance": BALANCE_BTC}
 
+def get_autotrade_active_from_db() -> bool:
+    """
+    Return True if the last auto-trade marker row indicates AUTO_TRADE_START.
+    This checks the 'trade_type' marker for robustness.
+    """
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("""
+            SELECT trade_type
+            FROM wallet_transactions
+            WHERE trade_type IN ('AUTO_TRADE_START', 'AUTO_TRADE_STOP')
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        return bool(row and row.get('trade_type') == 'AUTO_TRADE_START')
+    finally:
+        conn.close()
+
 def get_last_wallet_balance():
     try:
         conn = get_mysql_connection()
@@ -728,11 +748,10 @@ BTC_WALLET = {"balance": BALANCE_BTC}
 # Initialize auto-trade state
 if 'AUTO_TRADING' not in st.session_state:
     st.session_state.AUTO_TRADING = {
-        "active": False,
+        "active": get_autotrade_active_from_db(),
         "last_price": 0,
         "sell_streak": 0
     }
-
 if 'AUTO_TRADE_STATE' not in st.session_state:
     st.session_state.AUTO_TRADE_STATE = {
         "entry_price": None
@@ -1016,7 +1035,7 @@ def get_last_trade_time_from_logs():
 
 # ------------------ AUTO TRADE FUNCTION ------------------
 
-def check_auto_trading(price_inr):
+def check_auto_trading_on_01_09_2025(price_inr):
     """Profit-only auto-trading with auto-disable on errors (DB integrated + idle stop)."""
     try:
         # --- ✅ Always trust DB for active status ---
@@ -1166,19 +1185,39 @@ def check_auto_trading(price_inr):
         error_msg = f"❌ Auto-Trade stopped due to error: {str(e)}"
         st.error(error_msg); send_telegram(error_msg)
 
-def check_auto_trading_on_29_08_2025(price_inr):
+def check_auto_trading(price_inr):
     """Profit-only auto-trading with auto-disable on errors (DB integrated)."""
     try:
-        if not st.session_state.AUTO_TRADING["active"]:
-            st.info("🔒 Auto-trade is inactive. No action taken.")
-            return
+        # if not st.session_state.AUTO_TRADING["active"]:
+        #     st.info("🔒 Auto-trade is inactive. No action taken.")
+        #     return
 
-        # --- Idle monitoring (no trades for >60 minutes) ---
-        idle_minutes = (datetime.now() - st.session_state.last_trade_time).total_seconds() / 60
-        if idle_minutes > 60:
-            msg = f"⚠️ No auto-trade activity for {int(idle_minutes)} minutes. Please check system!"
-            st.warning(msg); send_telegram(msg)
-            st.session_state.last_trade_time = datetime.now()  # ✅ reset after alert
+         # --- ✅ Always trust DB for active status ---
+        if not get_autotrade_active_from_db():
+            st.session_state.AUTO_TRADING["active"] = False
+            st.session_state["autotrade_toggle"] = False
+            st.info("🔒 Auto-trade is inactive (DB state). No action taken.")
+            return
+        else:
+            st.session_state.AUTO_TRADING["active"] = True
+            st.session_state["autotrade_toggle"] = True
+
+        # --- Idle Monitoring (stop if no trade > 60 mins) ---
+        last_trade_time = get_last_trade_time_from_logs()
+        if last_trade_time:
+            idle_minutes = (datetime.now() - last_trade_time).total_seconds() / 60
+            if idle_minutes > 60:
+                st.session_state.AUTO_TRADING["active"] = False
+                st.session_state["autotrade_toggle"] = False
+                update_wallet_daily_summary(auto_end=True)
+                update_autotrade_status_db(0)
+
+                msg = f"⏰ Auto-Trade auto-stopped after {idle_minutes:.0f} minutes of inactivity"
+                st.warning(msg); send_telegram(msg)
+
+                log_wallet_transaction("AUTO_IDLE_STOP", 0, BTC_WALLET['balance'], price_inr, "AUTO_IDLE_STOP")
+                log_inr_transaction("AUTO_IDLE_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
+                return
 
         # --- Fetch last price from DB if not set in session ---
         if st.session_state.AUTO_TRADING["last_price"] == 0:
@@ -1603,25 +1642,6 @@ def get_last_auto_trade_price_from_db_old():
     conn.close()
     return float(result['balance_after']) if result and result['balance_after'] is not None else 0.0
 
-def get_autotrade_active_from_db() -> bool:
-    """Check the latest marker row to determine if auto-trade is active."""
-    conn = get_mysql_connection()
-    try:
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("""
-            SELECT autotrade_active
-            FROM wallet_transactions
-            WHERE is_autotrade_marker = TRUE
-            ORDER BY trade_time DESC
-            LIMIT 1
-        """)
-        row = cursor.fetchone()
-        # return bool(row[0]) if row else False
-        return bool(row['autotrade_active']) if row else False
-    finally:
-        conn.close()
-
-
 def get_last_auto_trade_price_from_db():
     """Gets the last stored auto-trade price marker"""
     conn = get_mysql_connection()
@@ -1707,42 +1727,47 @@ def update_autotrade_status_db_old(status: int):
         if conn:
             conn.close()
 
-def update_autotrade_status_db(status: int):
-    """Insert a marker row indicating auto-trade status (active/inactive)."""
+
+def update_autotrade_status_db(active: int, last_price: float = 0.0):
+    """
+    Insert a marker row indicating auto-trade start/stop.
+    Also ensures today's wallet_history has auto_start_price set when starting.
+    """
     conn = None
     try:
         conn = get_mysql_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
+        trade_type = "AUTO_TRADE_START" if active else "AUTO_TRADE_STOP"
         cursor.execute("""
             INSERT INTO wallet_transactions 
-            (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, is_autotrade_marker, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, is_autotrade_marker, status, last_price)
+            VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            datetime.now(), 
-            "AUTO_META",
-            0,
-            0,
-            0,
-            "AUTO_TRADE_START" if status else "AUTO_TRADE_STOP",  # ✅ better logging
-            bool(status),   # ✅ matches BOOLEAN column
-            True,
-            "SUCCESS"   # ✅ explicitly set
+            trade_type, 0, 0, 0, trade_type, bool(active), True, "SUCCESS", last_price
         ))
 
+        # If starting, ensure wallet_history row for today and set auto_start_price if not present
+        if active:
+            today = datetime.now().date()
+            cursor.execute("SELECT id, auto_start_price FROM wallet_history WHERE trade_date=%s", (today,))
+            row = cursor.fetchone()
+            if not row:
+                cursor.execute("""
+                    INSERT INTO wallet_history (trade_date, start_balance, end_balance, current_inr_value, trade_count, auto_start_price)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (today, 0, 0, 0, 0, last_price))
+            else:
+                if not row.get("auto_start_price"):
+                    cursor.execute("UPDATE wallet_history SET auto_start_price=%s WHERE trade_date=%s", (last_price, today))
+
         conn.commit()
-        print(f"✅ Auto-trade status updated to: {'Active' if status else 'Inactive'}")
-
     except Exception as e:
-        st.error(f"❌ Failed to update auto-trade status: {e}")
-        print("❌ DB Error (autotrade status):", e)
-        raise
-
+        print("update_autotrade_status_db error:", e)
     finally:
         if conn:
             conn.close()
-
-
+            
 def check_price_threshold(price):
     if price >= ALERT_THRESHOLD_UP:
         msg = f"🚀 BTC just crossed ${ALERT_THRESHOLD_UP:,}! Current: ${price:,.2f}"
@@ -2597,15 +2622,19 @@ def get_historical_klines(market="BTCINR", interval="1h", limit=168):
     """
     url = f"{BASE_URL}/exchange/v1/market_data/ohlc"
     payload = {
-        "pair": market,
+        "pair": market.upper(),
         "interval": interval,
         "limit": limit
     }
     try:
         res = requests.post(url, json=payload)
         data = res.json()
+
+        if market.upper() not in data:
+            return None   # ❌ not found → caller decides fallback
+
         ohlcv = []
-        for item in data[market]:
+        for item in data[market.upper()]:
             ohlcv.append([
                 datetime.fromtimestamp(item["time"] / 1000),  # ms → datetime
                 float(item["open"]),
@@ -2617,23 +2646,78 @@ def get_historical_klines(market="BTCINR", interval="1h", limit=168):
         return ohlcv
     except Exception as e:
         st.error(f"Error fetching OHLCV: {e}")
-        return []
+        return None
+
 
 def get_hourly_klines():
     try:
-        data = get_historical_klines("BTCINR", interval="1h", limit=168)  # last 7 days
+        # ✅ Try BTCINR first
+        data = get_historical_klines("BTCINR", interval="1h", limit=168)
+
+        # ✅ If not available, fallback to BTCUSDT
+        if not data:
+            st.warning("BTCINR not available, falling back to BTCUSDT")
+            data = get_historical_klines("BTCUSDT", interval="1h", limit=168)
+
         if not data:
             return pd.DataFrame()
 
         df = pd.DataFrame(data, columns=[
             "timestamp", "open", "high", "low", "close", "volume"
         ])
-        # Already converted to datetime above, no unit="ms" needed
         df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
         return df
     except Exception as e:
         st.error(f"Error fetching data: {e}")
         return pd.DataFrame()
+
+
+# @st.cache_data(ttl=300)
+# def get_historical_klines(market="BTCINR", interval="1h", limit=168):
+#     """
+#     Fetch historical OHLCV data from CoinDCX
+#     interval: "1m", "5m", "15m", "1h", "1d"
+#     limit: number of candles
+#     """
+#     url = f"{BASE_URL}/exchange/v1/market_data/ohlc"
+#     payload = {
+#         "pair": market,
+#         "interval": interval,
+#         "limit": limit
+#     }
+#     try:
+#         res = requests.post(url, json=payload)
+#         data = res.json()
+#         ohlcv = []
+#         for item in data[market]:
+#             ohlcv.append([
+#                 datetime.fromtimestamp(item["time"] / 1000),  # ms → datetime
+#                 float(item["open"]),
+#                 float(item["high"]),
+#                 float(item["low"]),
+#                 float(item["close"]),
+#                 float(item["volume"])
+#             ])
+#         return ohlcv
+#     except Exception as e:
+#         st.error(f"Error fetching OHLCV: {e}")
+#         return []
+
+# def get_hourly_klines():
+#     try:
+#         data = get_historical_klines("BTCINR", interval="1h", limit=168)  # last 7 days
+#         if not data:
+#             return pd.DataFrame()
+
+#         df = pd.DataFrame(data, columns=[
+#             "timestamp", "open", "high", "low", "close", "volume"
+#         ])
+#         # Already converted to datetime above, no unit="ms" needed
+#         df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+#         return df
+#     except Exception as e:
+#         st.error(f"Error fetching data: {e}")
+#         return pd.DataFrame()
 
 # Date selection
 st.write("Select Date Range:")

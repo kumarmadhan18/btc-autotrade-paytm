@@ -76,9 +76,11 @@ def paytm_webhook():
     c = conn.cursor()
 
     if txn_status == "TXN_SUCCESS":
+        c = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         c.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
         row = c.fetchone()
-        balance = row['balance_after'] if row else 0
+        balance = float(row['balance_after']) if row and row['balance_after'] is not None else 0.0
+        # balance = row['balance_after'] if row else 0
         new_balance = balance + amount
         c.execute("""
             INSERT INTO inr_wallet_transactions
