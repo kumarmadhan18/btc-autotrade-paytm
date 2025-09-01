@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import datetime
 from dotenv import load_dotenv
@@ -23,7 +24,6 @@ load_dotenv()
 REAL_TRADING = False
 ENABLE_NOTIFICATIONS = True
 AUTO_REFRESH_INTERVAL = 15  # seconds
-
 
 def background_autotrade_loop():
     """Persistent background auto-trade worker: DB-driven, idle-safe."""
@@ -79,7 +79,7 @@ def background_autotrade_loop():
         time.sleep(AUTO_REFRESH_INTERVAL)
 
 
-# ----------------- Flask Wrapper for Render / Persistent Worker -----------------
+# ----------------- Flask Wrapper for Render Health Check -----------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -94,5 +94,6 @@ if __name__ == "__main__":
     t = threading.Thread(target=background_autotrade_loop, daemon=True)
     t.start()
 
-    # Keep Flask alive so cloud host detects an open port
-    app.run(host="0.0.0.0", port=10000)
+    # Use Render-provided port (fallback to 10000 locally)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
