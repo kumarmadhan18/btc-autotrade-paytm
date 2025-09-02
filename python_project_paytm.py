@@ -738,23 +738,23 @@ def get_last_wallet_balance():
         return 0.000, None
 
 
-def get_last_wallet_balance_old():
-    try:
-        conn = get_mysql_connection()
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("SELECT balance_after, trade_time FROM wallet_transactions ORDER BY trade_time DESC LIMIT 1")
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
+# def get_last_wallet_balance_old():
+#     try:
+#         conn = get_mysql_connection()
+#         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+#         cursor.execute("SELECT balance_after, trade_time FROM wallet_transactions ORDER BY trade_time DESC LIMIT 1")
+#         result = cursor.fetchone()
+#         cursor.close()
+#         conn.close()
 
-        if result and result['balance_after'] is not None float(result['balance_after']) != 0.0:
-        # if result and result['balance_after'] is not None:
-            return float(result['balance_after']), result['trade_time']
-        else:
-            return 0.000, None
-    except Exception as e:
-        print(f"⚠️ Error fetching last wallet balance: {e}")
-        return 0.000, None
+#         if result and result['balance_after'] is not None float(result['balance_after']) != 0.0:
+#         # if result and result['balance_after'] is not None:
+#             return float(result['balance_after']), result['trade_time']
+#         else:
+#             return 0.000, None
+#     except Exception as e:
+#         print(f"⚠️ Error fetching last wallet balance: {e}")
+#         return 0.000, None
 
 # Initialize session state for BTC wallet
 print("REAL_TRADING =", REAL_TRADING)
