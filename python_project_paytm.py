@@ -1035,7 +1035,7 @@ def get_last_trade_time_from_logs():
 
 # ------------------ AUTO TRADE FUNCTION ------------------
 
-def check_auto_trading_on_01_09_2025(price_inr):
+def check_auto_trading(price_inr):
     """Profit-only auto-trading with auto-disable on errors (DB integrated + idle stop)."""
     try:
         # --- ✅ Always trust DB for active status ---
@@ -1185,7 +1185,7 @@ def check_auto_trading_on_01_09_2025(price_inr):
         error_msg = f"❌ Auto-Trade stopped due to error: {str(e)}"
         st.error(error_msg); send_telegram(error_msg)
 
-def check_auto_trading(price_inr: float):
+def check_auto_trading_02_09_2025(price_inr: float):
     """Profit-only auto-trading with auto-disable on errors (DB integrated)."""
     try:
         # --- Guard against bad price ---
