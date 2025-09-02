@@ -710,8 +710,35 @@ def get_autotrade_active_from_db() -> bool:
         return bool(row and row.get('trade_type') == 'AUTO_TRADE_START')
     finally:
         conn.close()
-
+        
 def get_last_wallet_balance():
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # ✅ Only pick rows where balance_after is not NULL and not zero
+        cursor.execute("""
+            SELECT balance_after, trade_time
+            FROM wallet_transactions
+            WHERE balance_after IS NOT NULL AND balance_after != 0
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """)
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if result:
+            return float(result['balance_after']), result['trade_time']
+        else:
+            return 0.000, None
+
+    except Exception as e:
+        print(f"⚠️ Error fetching last wallet balance: {e}")
+        return 0.000, None
+
+
+def get_last_wallet_balance_old():
     try:
         conn = get_mysql_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -720,7 +747,8 @@ def get_last_wallet_balance():
         cursor.close()
         conn.close()
 
-        if result and result['balance_after'] is not None:
+        if result and result['balance_after'] is not None float(result['balance_after']) != 0.0:
+        # if result and result['balance_after'] is not None:
             return float(result['balance_after']), result['trade_time']
         else:
             return 0.000, None
