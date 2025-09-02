@@ -1737,8 +1737,43 @@ def update_autotrade_status_db_old(status: int):
         if conn:
             conn.close()
 
+def update_autotrade_status_db(status: int):
+    """Insert a marker row indicating auto-trade status (active/inactive)."""
+    conn = None
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-def update_autotrade_status_db(active: int, last_price: float = 0.0):
+        cursor.execute("""
+            INSERT INTO wallet_transactions 
+            (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, is_autotrade_marker, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            datetime.now(), 
+            "AUTO_META",
+            0,
+            0,
+            0,
+            "AUTO_TRADE_START" if status else "AUTO_TRADE_STOP",  # ✅ better logging
+            bool(status),   # ✅ matches BOOLEAN column
+            True,
+            "SUCCESS"   # ✅ explicitly set
+        ))
+
+        conn.commit()
+        print(f"✅ Auto-trade status updated to: {'Active' if status else 'Inactive'}")
+
+    except Exception as e:
+        st.error(f"❌ Failed to update auto-trade status: {e}")
+        print("❌ DB Error (autotrade status):", e)
+        raise
+
+    finally:
+        if conn:
+            conn.close()
+
+
+def update_autotrade_status_db_new(active: int, last_price: float = 0.0):
     """
     Insert a marker row indicating auto-trade start/stop.
     Also ensures today's wallet_history has auto_start_price set when starting.
