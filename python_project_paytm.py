@@ -1577,162 +1577,111 @@ def get_last_auto_trade():
 
 def check_auto_trading(price_inr):
     """
-    Profit-only auto-trading with:
-    - Duplicate prevention
-    - Idle timeout
-    - Safe initial auto-buy
-    - DB-based state recovery
+    Final Stable Auto-Trading Logic:
+    - Initial BUY only if BTC balance == 0
+    - Single BUY → HOLD → SELL cycle
+    - ROI + threshold based SELL
+    - Idle timeout (30m)
+    - Duplicate prevention via DB + cooldown
+    - Full DB logging for persistence
     """
     try:
         if not st.session_state.AUTO_TRADING.get("active", False):
-            st.info("🔒 Auto-trade is inactive. No action taken.")
             return
 
-        # --- Idle timer check (stop after 5 min no trades) ---
-        idle_timeout = 1800  # 5 minutes
+        if not price_inr or price_inr <= 0:
+            st.info("⚠️ Skipping auto-trade: invalid price.")
+            return
+
+        # --- Idle timeout ---
+        idle_timeout = 1800  # 30 min
         last_trade_time = get_last_trade_time_from_db()
         if last_trade_time and (time.time() - last_trade_time) > idle_timeout:
             st.session_state.AUTO_TRADING["active"] = False
             st.session_state["autotrade_toggle"] = False
             update_autotrade_status_db(0)
-            msg = "⚠️ Auto-Trade stopped due to inactivity (idle timeout)"
-            st.warning(msg)
-            send_telegram(msg)
+            update_wallet_daily_summary(auto_end=True)
+            send_telegram("⏳ Auto-Trade stopped (idle timeout)")
             return
 
-        # --- Get last trade from DB to avoid duplicates ---
-        last_trade = get_last_auto_trade()  # {trade_type, trade_time}
+        # --- Trade history (for duplicate prevention) ---
+        last_trade = get_last_auto_trade()
         now_ts = int(time.time())
         last_type = last_trade["trade_type"] if last_trade else None
         last_ts = int(last_trade["trade_time"].timestamp()) if last_trade else 0
+        trade_cooldown = 120  # 2 minutes
 
-        # --- Setup defaults ---
-        if "sell_streak" not in st.session_state.AUTO_TRADING:
-            st.session_state.AUTO_TRADING["sell_streak"] = 0
+        # --- Config ---
+        threshold = 5      # INR price trigger
+        min_roi = 0.01     # % minimum profit
+        last_price = st.session_state.AUTO_TRADING.get("last_price", 0)
+        entry_price = st.session_state.AUTO_TRADING.get("entry_price", 0)
+        price_diff = price_inr - last_price if last_price else 0
 
-        if "last_price" not in st.session_state.AUTO_TRADING:
-            st.session_state.AUTO_TRADING["last_price"] = price_inr
-            update_last_auto_trade_price_db(price_inr)
-            return  # don’t trade immediately on first run
+        # === INITIAL AUTO-BUY (only if BTC = 0) ===
+        if BTC_WALLET['balance'] == 0 and INR_WALLET['balance'] >= 20:
+            if last_type == "AUTO_INITIAL_BUY" and (now_ts - last_ts < trade_cooldown):
+                return  # skip duplicate
 
-        threshold = 5       # price movement trigger
-        min_roi = 0.01      # min profit %
-        price_diff = price_inr - st.session_state.AUTO_TRADING["last_price"]
-
-        # --- INITIAL AUTO-BUY ---
-        if (
-            BTC_WALLET['balance'] == 0 and
-            INR_WALLET['balance'] >= 20 and
-            (last_type != "AUTO_INITIAL_BUY")  # ensure not already done
-        ):
             buy_amount_inr = INR_WALLET['balance'] * 0.5
             btc_bought = buy_amount_inr / price_inr
 
             BTC_WALLET['balance'] = btc_bought
             INR_WALLET['balance'] -= buy_amount_inr
 
+            st.session_state.AUTO_TRADING["entry_price"] = price_inr
             st.session_state.AUTO_TRADING["last_price"] = price_inr
-            st.session_state.AUTO_TRADING["sell_streak"] = 0
 
             update_last_auto_trade_price_db(price_inr)
 
-            msg = f"🟢 Initial Auto-BUY ₹{buy_amount_inr:.2f} → {btc_bought:.6f} BTC at ₹{price_inr:.2f}"
-            st.success(msg)
-            st.toast(msg)
-            send_telegram(msg)
+            msg = f"🟢 Initial Auto-BUY {btc_bought:.6f} BTC @ ₹{price_inr:.2f}"
+            st.success(msg); st.toast(msg); send_telegram(msg)
 
             log_wallet_transaction("AUTO_BUY", btc_bought, BTC_WALLET['balance'], price_inr, "AUTO_INITIAL_BUY")
-            log_inr_transaction("AUTO_BUY", -buy_amount_inr, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
+            log_inr_transaction("AUTO_BUY", -buy_amount_inr, INR_WALLET['balance'],
+                                "LIVE" if REAL_TRADING else "TEST")
             save_trade_log("AUTO_BUY", btc_bought, BTC_WALLET['balance'], price_inr)
+            return
 
-            return  # don’t trigger normal BUY/SELL in same tick
+        # === AUTO-SELL (only if BTC > 0 and entry_price set) ===
+        if BTC_WALLET['balance'] > 0 and entry_price > 0:
+            roi = ((price_inr - entry_price) / entry_price) * 100
+            if roi >= min_roi and price_diff >= threshold:
+                if last_type == "AUTO_SELL" and (now_ts - last_ts < trade_cooldown):
+                    return  # skip duplicate
 
-        # --- BUY Logic ---
-        if price_diff <= -threshold:
-            if INR_WALLET['balance'] >= 20:
-                # Prevent duplicate AUTO_BUY
-                if last_type == "AUTO_BUY" and (now_ts - last_ts < 30):
-                    st.info("⏸ Skipped duplicate AUTO_BUY")
-                    return
+                sell_btc = BTC_WALLET['balance']
+                inr_received = sell_btc * price_inr
 
-                if BTC_WALLET['balance'] == 0:
-                    buy_amount_inr = INR_WALLET['balance'] * 0.5  # 50% for first buy
-                else:
-                    # --- Auto Buy (accumulate) ---
-                    buy_amount_inr = INR_WALLET['balance'] * 0.5  # still 50%, or change if you want smaller increments
+                BTC_WALLET['balance'] = 0
+                INR_WALLET['balance'] += inr_received
 
-                buy_amount_inr = INR_WALLET['balance'] * 0.5
-                btc_bought = buy_amount_inr / price_inr
-
-                BTC_WALLET['balance'] += btc_bought
-                INR_WALLET['balance'] -= buy_amount_inr
-
+                st.session_state.AUTO_TRADING["entry_price"] = 0
                 st.session_state.AUTO_TRADING["last_price"] = price_inr
-                st.session_state.AUTO_TRADING["sell_streak"] = 0
 
                 update_last_auto_trade_price_db(price_inr)
 
-                msg = f"🟢 Auto-BUY ₹{buy_amount_inr:.2f} → {btc_bought:.6f} BTC at ₹{price_inr:.2f}"
-                st.success(msg)
-                st.toast(msg)
-                send_telegram(msg)
+                msg = f"🔴 Auto-SELL {sell_btc:.6f} BTC → ₹{inr_received:.2f} @ ₹{price_inr:.2f} | ROI {roi:.2f}%"
+                st.warning(msg); st.toast(msg); send_telegram(msg)
 
-                log_wallet_transaction("AUTO_BUY", btc_bought, BTC_WALLET['balance'], price_inr, "AUTO_BUY")
-                log_inr_transaction("AUTO_BUY", -buy_amount_inr, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-                save_trade_log("AUTO_BUY", btc_bought, BTC_WALLET['balance'], price_inr)
+                log_wallet_transaction("AUTO_SELL", sell_btc, BTC_WALLET['balance'], price_inr, "AUTO_SELL")
+                log_inr_transaction("AUTO_SELL", inr_received, INR_WALLET['balance'],
+                                    "LIVE" if REAL_TRADING else "TEST")
+                save_trade_log("AUTO_SELL", sell_btc, BTC_WALLET['balance'], price_inr, roi)
+                return
 
-        # --- SELL Logic ---
-        elif price_diff >= threshold:
-            sell_btc = BTC_WALLET['balance']
-            entry_price = st.session_state.AUTO_TRADING.get("last_price", 0)
-
-            if sell_btc >= 0.0001 and entry_price > 0:
-                roi = ((price_inr - entry_price) / entry_price) * 100
-
-                if roi >= min_roi:
-                    # Prevent duplicate AUTO_SELL
-                    if last_type == "AUTO_SELL" and (now_ts - last_ts < 30):
-                        st.info("⏸ Skipped duplicate AUTO_SELL")
-                        return
-
-                    BTC_WALLET['balance'] -= sell_btc
-                    inr_received = sell_btc * price_inr
-                    INR_WALLET['balance'] += inr_received
-
-                    st.session_state.AUTO_TRADING["last_price"] = price_inr
-                    st.session_state.AUTO_TRADING["sell_streak"] = 0
-
-                    update_last_auto_trade_price_db(price_inr)
-
-                    msg = f"🔴 Auto-SELL {sell_btc:.6f} BTC → ₹{inr_received:.2f} at ₹{price_inr:.2f} | ROI: {roi:.2f}%"
-                    st.warning(msg)
-                    st.toast(msg)
-                    send_telegram(msg)
-
-                    log_wallet_transaction("AUTO_SELL", sell_btc, BTC_WALLET['balance'], price_inr, "AUTO_SELL")
-                    log_inr_transaction("AUTO_SELL", inr_received, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-                    save_trade_log("AUTO_SELL", sell_btc, BTC_WALLET['balance'], price_inr, roi)
-                else:
-                    st.info(f"⚠️ Auto-SELL skipped: ROI {roi:.2f}% < {min_roi}%")
-
-        # --- Auto-disable after 3 failed sells ---
-        if st.session_state.AUTO_TRADING["sell_streak"] >= 3:
-            st.session_state.AUTO_TRADING["active"] = False
-            st.session_state["autotrade_toggle"] = False
-            update_wallet_daily_summary(auto_end=True)
-            update_autotrade_status_db(0)
-            msg = "🛑 Auto-Trade auto-disabled after 3 losing trades"
-            st.warning(msg)
-            send_telegram(msg)
+        # === Update last price if not set ===
+        if last_price == 0:
+            st.session_state.AUTO_TRADING["last_price"] = price_inr
+            update_last_auto_trade_price_db(price_inr)
 
     except Exception as e:
         st.session_state.AUTO_TRADING["active"] = False
         st.session_state["autotrade_toggle"] = False
         update_wallet_daily_summary(auto_end=True)
         update_autotrade_status_db(0)
-        error_msg = f"❌ Auto-Trade stopped due to error: {str(e)}"
-        st.error(error_msg)
-        send_telegram(error_msg)
+        error_msg = f"❌ Auto-Trade stopped: {str(e)}"
+        st.error(error_msg); send_telegram(error_msg)
 
     # except Exception as e:
     #     st.session_state.AUTO_TRADING["active"] = False
