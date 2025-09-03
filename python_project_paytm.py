@@ -1385,11 +1385,11 @@ def check_auto_trading_02_09_2025(price_inr: float):
 def check_auto_trading(price_inr):
     """Profit-only auto-trading with auto-disable on errors (DB integrated)."""
     try:
-         # --- Validate price before doing anything ---
+        # --- Validate price before doing anything ---
         if price_inr is None or price_inr <= 0:
             st.info("⚠️ Skipping auto-trade: Invalid market price.")
             return
-            
+
         if not st.session_state.AUTO_TRADING["active"]:
             st.info("🔒 Auto-trade is inactive. No action taken.")
             return
@@ -1397,7 +1397,7 @@ def check_auto_trading(price_inr):
         # --- Fetch last price from DB if not set in session ---
         if st.session_state.AUTO_TRADING["last_price"] == 0:
             db_last_price = get_latest_auto_start_price()
-            if db_last_price and db_last_price > 0:
+            if db_last_price is not None and db_last_price > 0:   # ✅ safe check
                 st.session_state.AUTO_TRADING["last_price"] = db_last_price
                 st.info(f"📌 Restored last trade price ₹{db_last_price:.2f} from DB")
             else:
@@ -1434,8 +1434,8 @@ def check_auto_trading(price_inr):
             return  # Skip further logic
 
         # --- Strategy params ---
-        threshold = 5        # ✅ keep as you had
-        min_roi = 0.01       # ✅ keep as you had
+        threshold = 5
+        min_roi = 0.01
         price_diff = price_inr - st.session_state.AUTO_TRADING["last_price"]
 
         # --- BUY logic ---
@@ -1464,7 +1464,7 @@ def check_auto_trading(price_inr):
         # --- SELL logic ---
         elif price_diff >= threshold:
             sell_btc = BTC_WALLET['balance']
-            entry_price = st.session_state.AUTO_TRADE_STATE.get("entry_price", 0)
+            entry_price = st.session_state.AUTO_TRADE_STATE.get("entry_price") or 0  # ✅ convert None → 0
 
             if sell_btc >= 0.0001 and entry_price > 0:
                 roi = ((price_inr - entry_price) / entry_price) * 100
@@ -1487,14 +1487,12 @@ def check_auto_trading(price_inr):
                     log_inr_transaction("AUTO_SELL", inr_received, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
                     save_trade_log("AUTO_SELL", sell_btc, BTC_WALLET['balance'], price_inr, roi)
                 else:
-                    # st.session_state.AUTO_TRADING["sell_streak"] += 1
                     st.info(f"⚠️ Auto-SELL skipped: ROI {roi:.2f}% < {min_roi}%")
 
-                     # 🔴 If ROI < 0 → Losing sell, increment streak
+                # 🔴 If ROI < 0 → Losing sell, increment streak
                 if roi < 0:
                     st.session_state.AUTO_TRADING["sell_streak"] += 1
                     st.info(f"⚠️ Losing Auto-SELL counted (streak={st.session_state.AUTO_TRADING['sell_streak']})")
-
 
         # --- Auto-disable after 3 failed sells ---
         if st.session_state.AUTO_TRADING["sell_streak"] >= 3:
