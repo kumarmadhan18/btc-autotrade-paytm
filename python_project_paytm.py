@@ -1385,6 +1385,11 @@ def check_auto_trading_02_09_2025(price_inr: float):
 def check_auto_trading(price_inr):
     """Profit-only auto-trading with auto-disable on errors (DB integrated)."""
     try:
+         # --- Validate price before doing anything ---
+        if price_inr is None or price_inr <= 0:
+            st.info("⚠️ Skipping auto-trade: Invalid market price.")
+            return
+            
         if not st.session_state.AUTO_TRADING["active"]:
             st.info("🔒 Auto-trade is inactive. No action taken.")
             return
