@@ -1381,23 +1381,58 @@ def check_auto_trading_02_09_2025(price_inr: float):
         error_msg = f"❌ Auto-Trade stopped due to error: {str(e)}"
         st.error(error_msg); send_telegram(error_msg)
 
-
 def get_last_trade_time_from_db():
-    """Return UNIX timestamp of last AUTO trade from wallet_transactions."""
+    """
+    Return the last AUTO trade time as an integer epoch (seconds),
+    or None if no AUTO trades exist.
+    Works for both Postgres and MySQL DB drivers that return datetime objects.
+    """
     conn = get_mysql_connection()
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("""
-            SELECT UNIX_TIMESTAMP(trade_time)
+            SELECT trade_time
             FROM wallet_transactions
             WHERE trade_type LIKE 'AUTO%'
             ORDER BY trade_time DESC
             LIMIT 1
         """)
         row = cursor.fetchone()
-        return row[0] if row and row[0] else None
+        cursor.close()
+
+        if not row:
+            return None
+
+        # If using RealDictCursor the row is a dict
+        trade_time = row.get("trade_time") if isinstance(row, dict) else row[0]
+
+        if trade_time is None:
+            return None
+
+        # If the driver already returns a datetime, convert to epoch
+        if isinstance(trade_time, datetime):
+            return int(trade_time.timestamp())
+
+        # Otherwise parse string timestamps (fallback)
+        ts_str = str(trade_time)
+        try:
+            # try ISO first
+            dt = datetime.fromisoformat(ts_str)
+        except Exception:
+            # fallback common format (adjust if your DB uses another format)
+            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+
+        return int(dt.timestamp())
+
+    except Exception as e:
+        # optional: log or re-raise
+        print("⚠️ get_last_trade_time_from_db error:", e)
+        return None
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def check_auto_trading(price_inr):
@@ -1414,7 +1449,6 @@ def check_auto_trading(price_inr):
         # --- Idle timeout ---
         idle_timeout = 1800  # 30 minutes
         last_trade_time = st.session_state.AUTO_TRADING.get("last_trade_time")
-
         if not last_trade_time:
             last_trade_time = get_last_trade_time_from_db()
             if last_trade_time:
