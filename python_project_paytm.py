@@ -309,10 +309,10 @@ def migrate_postgres_tables():
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INTEGER USING autotrade_active::integer, ALTER COLUMN autotrade_active SET DEFAULT 0;")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING (is_autotrade_marker::INTEGER <> 0);")
-    # cursor.execute("TRUNCATE wallet_history;")
-    # cursor.execute("TRUNCATE wallet_transactions;")
-    # cursor.execute("TRUNCATE inr_wallet_transactions;")
-    # cursor.execute("TRUNCATE user_wallets;")
+    cursor.execute("TRUNCATE wallet_history;")
+    cursor.execute("TRUNCATE wallet_transactions;")
+    cursor.execute("TRUNCATE inr_wallet_transactions;")
+    cursor.execute("TRUNCATE user_wallets;")
 
     conn.commit()
     cursor.close()
@@ -1604,7 +1604,7 @@ def check_auto_trading(price_inr):
             send_telegram("⏳ Auto-Trade stopped (idle timeout)")
             return
 
-        # --- Trade history (for duplicate prevention) ---
+        # --- Last trade (for duplicate prevention) ---
         last_trade = get_last_auto_trade()
         now_ts = int(time.time())
         last_type = last_trade["trade_type"] if last_trade else None
@@ -1612,8 +1612,8 @@ def check_auto_trading(price_inr):
         trade_cooldown = 120  # 2 minutes
 
         # --- Config ---
-        threshold = 5      # INR price trigger
-        min_roi = 0.01     # % minimum profit
+        threshold = 5      # INR price movement trigger
+        min_roi = 0.01     # 1% minimum profit
         last_price = st.session_state.AUTO_TRADING.get("last_price", 0)
         entry_price = st.session_state.AUTO_TRADING.get("entry_price", 0)
         price_diff = price_inr - last_price if last_price else 0
@@ -1631,8 +1631,6 @@ def check_auto_trading(price_inr):
 
             st.session_state.AUTO_TRADING["entry_price"] = price_inr
             st.session_state.AUTO_TRADING["last_price"] = price_inr
-
-            update_last_auto_trade_price_db(price_inr)
 
             msg = f"🟢 Initial Auto-BUY {btc_bought:.6f} BTC @ ₹{price_inr:.2f}"
             st.success(msg); st.toast(msg); send_telegram(msg)
@@ -1659,8 +1657,6 @@ def check_auto_trading(price_inr):
                 st.session_state.AUTO_TRADING["entry_price"] = 0
                 st.session_state.AUTO_TRADING["last_price"] = price_inr
 
-                update_last_auto_trade_price_db(price_inr)
-
                 msg = f"🔴 Auto-SELL {sell_btc:.6f} BTC → ₹{inr_received:.2f} @ ₹{price_inr:.2f} | ROI {roi:.2f}%"
                 st.warning(msg); st.toast(msg); send_telegram(msg)
 
@@ -1673,7 +1669,6 @@ def check_auto_trading(price_inr):
         # === Update last price if not set ===
         if last_price == 0:
             st.session_state.AUTO_TRADING["last_price"] = price_inr
-            update_last_auto_trade_price_db(price_inr)
 
     except Exception as e:
         st.session_state.AUTO_TRADING["active"] = False
