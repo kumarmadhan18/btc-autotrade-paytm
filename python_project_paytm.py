@@ -1063,7 +1063,7 @@ def get_last_trade_time_from_logs():
 
 # ------------------ AUTO TRADE FUNCTION ------------------
 
-def check_auto_trading(price_inr):
+def check_auto_trading_old_with_updated(price_inr):
     """Profit-only auto-trading with auto-disable on errors (DB integrated)"""
     try:
         if not st.session_state.AUTO_TRADING["active"]:
@@ -1575,7 +1575,7 @@ def get_last_auto_trade():
     finally:
         conn.close()
 
-def check_auto_trading_on_03_09_2025(price_inr):
+def check_auto_trading(price_inr):
     """
     Profit-only auto-trading with:
     - Duplicate prevention
@@ -1628,7 +1628,7 @@ def check_auto_trading_on_03_09_2025(price_inr):
             buy_amount_inr = INR_WALLET['balance'] * 0.5
             btc_bought = buy_amount_inr / price_inr
 
-            BTC_WALLET['balance'] += btc_bought
+            BTC_WALLET['balance'] = btc_bought
             INR_WALLET['balance'] -= buy_amount_inr
 
             st.session_state.AUTO_TRADING["last_price"] = price_inr
@@ -1658,7 +1658,7 @@ def check_auto_trading_on_03_09_2025(price_inr):
                 buy_amount_inr = INR_WALLET['balance'] * 0.5
                 btc_bought = buy_amount_inr / price_inr
 
-                BTC_WALLET['balance'] += btc_bought
+                BTC_WALLET['balance'] = btc_bought
                 INR_WALLET['balance'] -= buy_amount_inr
 
                 st.session_state.AUTO_TRADING["last_price"] = price_inr
