@@ -1655,10 +1655,16 @@ def check_auto_trading(price_inr):
                     st.info("⏸ Skipped duplicate AUTO_BUY")
                     return
 
+                if BTC_WALLET['balance'] == 0:
+                    buy_amount_inr = INR_WALLET['balance'] * 0.5  # 50% for first buy
+                else:
+                    # --- Auto Buy (accumulate) ---
+                    buy_amount_inr = INR_WALLET['balance'] * 0.5  # still 50%, or change if you want smaller increments
+
                 buy_amount_inr = INR_WALLET['balance'] * 0.5
                 btc_bought = buy_amount_inr / price_inr
 
-                BTC_WALLET['balance'] = btc_bought
+                BTC_WALLET['balance'] += btc_bought
                 INR_WALLET['balance'] -= buy_amount_inr
 
                 st.session_state.AUTO_TRADING["last_price"] = price_inr
