@@ -1131,7 +1131,7 @@ def get_last_auto_trade():
         return row if row else None
     finally:
         conn.close()
-        
+
 def check_auto_trading(price_inr):
     """
     Auto-trading logic for BTC-INR market.
@@ -1146,8 +1146,16 @@ def check_auto_trading(price_inr):
             return
 
         now_ts = int(time.time())
+        # last_trade = get_last_auto_trade()
+        # last_type, last_ts, entry_price = last_trade if last_trade else (None, 0, 0)
         last_trade = get_last_auto_trade()
-        last_type, last_ts, entry_price = last_trade if last_trade else (None, 0, 0)
+        if last_trade:
+            last_type = last_trade["trade_type"]
+            last_ts = int(last_trade["trade_time"].timestamp())
+        else:
+            last_type, last_ts = None, 0
+
+        entry_price = st.session_state.AUTO_TRADING.get("entry_price", 0)
 
         min_roi = 0.01  # 1% profit target
         threshold = 50  # INR move threshold
