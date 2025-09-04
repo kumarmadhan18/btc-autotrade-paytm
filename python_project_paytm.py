@@ -1213,32 +1213,43 @@ def check_auto_trading(price_inr):
             return
 
         # === AUTO-SELL (only if BTC > 0 and entry_price set) ===
+               # === AUTO-SELL (only if BTC > 0 and entry_price set) ===
         if BTC_WALLET['balance'] > 0 and entry_price > 0:
             roi = ((price_inr - entry_price) / entry_price) * 100
             if roi >= min_roi and price_diff >= threshold:
+                # Duplicate prevention
                 if last_type == "AUTO_SELL" and (now_ts - last_ts < trade_cooldown):
-                    return  # skip duplicate
+                    return  # skip duplicate sell
 
+                # 🔴 Sell 100% of wallet BTC
                 sell_btc = BTC_WALLET['balance']
+                if sell_btc <= 0:
+                    return  # nothing to sell
+
                 inr_received = sell_btc * price_inr
 
+                # Reset wallet balances after selling all
                 BTC_WALLET['balance'] = 0
                 INR_WALLET['balance'] += inr_received
 
+                # Reset entry price for next cycle
                 st.session_state.AUTO_TRADING["entry_price"] = 0
                 st.session_state.AUTO_TRADING["last_price"] = price_inr
 
                 update_last_auto_trade_price_db(price_inr)
 
-                msg = f"🔴 Auto-SELL {sell_btc:.6f} BTC → ₹{inr_received:.2f} @ ₹{price_inr:.2f} | ROI {roi:.2f}%"
+                msg = (f"🔴 Auto-SELL {sell_btc:.6f} BTC → ₹{inr_received:.2f} "
+                       f"@ ₹{price_inr:.2f} | ROI {roi:.4f}%")
                 st.warning(msg); st.toast(msg); send_telegram(msg)
 
-                # SELL marker → is_autotrade_maker = TRUE
+                # Log sell (is_autotrade_maker = TRUE)
                 log_wallet_transaction("AUTO_SELL", sell_btc, BTC_WALLET['balance'], price_inr, "AUTO_SELL")
                 log_inr_transaction("AUTO_SELL", inr_received, INR_WALLET['balance'],
                                     "LIVE" if REAL_TRADING else "TEST")
+
                 save_trade_log("AUTO_SELL", sell_btc, BTC_WALLET['balance'], price_inr, roi)
                 return
+
 
         # === Update last price if not set ===
         if last_price == 0:
