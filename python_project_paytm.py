@@ -1131,7 +1131,8 @@ def get_last_auto_trade():
         return row if row else None
     finally:
         conn.close()
-def check_auto_trading():
+        
+def check_auto_trading(price_inr):
     """
     Auto-trading logic for BTC-INR market.
     - Initial BUY when BTC wallet is 0
