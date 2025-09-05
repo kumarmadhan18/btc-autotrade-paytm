@@ -333,29 +333,29 @@ def get_last_inr_balance_with_tuple_error():
     # return float(result[0]) if result else 10000.0
 
 def get_last_inr_balance():
-    """Return the last INR wallet balance as a float (safe)."""
+    """
+    Returns the last INR balance and trade_time.
+    Always returns a tuple: (balance: float, trade_time: float or None)
+    """
     conn = get_mysql_connection()
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("""
-            SELECT balance_after 
+            SELECT balance_after, EXTRACT(EPOCH FROM trade_time) AS ts
             FROM inr_wallet_transactions
+            WHERE status = 'SUCCESS'
             ORDER BY trade_time DESC
             LIMIT 1
         """)
         row = cursor.fetchone()
-        if not row:
-            return 0.0
-
-        if isinstance(row, tuple):
-            return float(row[0] or 0.0)
-        elif isinstance(row, dict):
-            return float(row.get("balance_after", 0.0) or 0.0)
+        if row:
+            balance = float(row.get("balance_after") or 0.0)
+            ts = float(row.get("ts") or 0.0)
+            return balance, ts
         else:
-            return float(row or 0.0)
+            return 0.0, None
     finally:
         conn.close()
-        
 
 INR_WALLET = {"balance": get_last_inr_balance()}
 # INR_WALLET =  {"balance": 10000.00}
@@ -699,30 +699,29 @@ def get_last_wallet_balance_with_tuple_error():
 #         conn.close()
 
 def get_last_wallet_balance():
-    """Return the last BTC wallet balance as a float (safe)."""
+    """
+    Returns the last BTC balance and trade_time.
+    Always returns a tuple: (balance: float, trade_time: float or None)
+    """
     conn = get_mysql_connection()
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("""
-            SELECT balance_after 
+            SELECT balance_after, EXTRACT(EPOCH FROM trade_time) AS ts
             FROM wallet_transactions
+            WHERE status = 'SUCCESS'
             ORDER BY trade_time DESC
             LIMIT 1
         """)
         row = cursor.fetchone()
-        if not row:
-            return 0.0
-
-        # Handle psycopg2 tuple or dict
-        if isinstance(row, tuple):
-            return float(row[0] or 0.0)
-        elif isinstance(row, dict):
-            return float(row.get("balance_after", 0.0) or 0.0)
+        if row:
+            balance = float(row.get("balance_after") or 0.0)
+            ts = float(row.get("ts") or 0.0)
+            return balance, ts
         else:
-            return float(row or 0.0)
+            return 0.0, None
     finally:
         conn.close()
-
 
 # Initialize session state for BTC wallet
 print("REAL_TRADING =", REAL_TRADING)
@@ -1302,9 +1301,11 @@ def check_auto_trading(price_inr: float):
     try:
         # --- Ensure wallets exist in session ---
         if "BTC_WALLET" not in st.session_state:
-            st.session_state.BTC_WALLET = {"balance": float(get_last_wallet_balance() or 0)}
+            btc_bal, _ = get_last_wallet_balance()
+            st.session_state.BTC_WALLET = {"balance": float(btc_bal or 0)}
         if "INR_WALLET" not in st.session_state:
-            st.session_state.INR_WALLET = {"balance": float(get_last_inr_balance() or 0)}
+            inr_bal, _ = get_last_inr_balance()
+            st.session_state.INR_WALLET = {"balance": float(inr_bal or 0)}
 
         btc_balance = float(st.session_state.BTC_WALLET.get("balance", 0.0) or 0.0)
         inr_balance = float(st.session_state.INR_WALLET.get("balance", 0.0) or 0.0)
@@ -1328,8 +1329,8 @@ def check_auto_trading(price_inr: float):
             st.session_state["autotrade_toggle"] = False
             update_autotrade_status_db(0)
 
-            btc_bal = float(get_last_wallet_balance() or 0)
-            inr_bal = float(get_last_inr_balance() or 0)
+            btc_bal, _ = get_last_wallet_balance()
+            inr_bal, _ = get_last_inr_balance()
 
             st.session_state.BTC_WALLET["balance"] = btc_bal
             st.session_state.INR_WALLET["balance"] = inr_bal
@@ -1428,8 +1429,8 @@ def check_auto_trading(price_inr: float):
         st.session_state["autotrade_toggle"] = False
         update_autotrade_status_db(0)
 
-        btc_bal = float(get_last_wallet_balance() or 0)
-        inr_bal = float(get_last_inr_balance() or 0)
+        btc_bal, _ = get_last_wallet_balance()
+        inr_bal, _ = get_last_inr_balance()
         log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
         log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
         update_wallet_daily_summary(auto_end=True)
