@@ -344,14 +344,18 @@ def get_last_inr_balance():
             LIMIT 1
         """)
         row = cursor.fetchone()
-        if row:
-            if isinstance(row, tuple):
-                return float(row[0] or 0)
-            if isinstance(row, dict):
-                return float(row.get("balance_after", 0) or 0)
-        return 0.0
+        if not row:
+            return 0.0
+
+        if isinstance(row, tuple):
+            return float(row[0] or 0.0)
+        elif isinstance(row, dict):
+            return float(row.get("balance_after", 0.0) or 0.0)
+        else:
+            return float(row or 0.0)
     finally:
         conn.close()
+        
 
 INR_WALLET = {"balance": get_last_inr_balance()}
 # INR_WALLET =  {"balance": 10000.00}
@@ -695,34 +699,29 @@ def get_last_wallet_balance_with_tuple_error():
 #         conn.close()
 
 def get_last_wallet_balance():
-    """
-    Fetch the last BTC balance and trade_time from wallet_transactions.
-    Always returns a tuple: (balance_btc, last_trade_time).
-    If no rows exist, returns (0.0, None).
-    """
+    """Return the last BTC wallet balance as a float (safe)."""
     conn = get_mysql_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT balance_btc, trade_time
+            SELECT balance_after 
             FROM wallet_transactions
             ORDER BY trade_time DESC
             LIMIT 1
         """)
         row = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        if not row:
+            return 0.0
 
-        if row:
-            balance_btc = float(row[0]) if row[0] is not None else 0.0
-            last_trade_time = row[1]
-            return balance_btc, last_trade_time
+        # Handle psycopg2 tuple or dict
+        if isinstance(row, tuple):
+            return float(row[0] or 0.0)
+        elif isinstance(row, dict):
+            return float(row.get("balance_after", 0.0) or 0.0)
         else:
-            return 0.0, None
-    except Exception as e:
-        # Optional: log error
-        print(f"❌ Error in get_last_wallet_balance: {e}")
-        return 0.0, None
+            return float(row or 0.0)
+    finally:
+        conn.close()
 
 
 # Initialize session state for BTC wallet
