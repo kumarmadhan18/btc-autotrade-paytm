@@ -672,27 +672,57 @@ def get_last_wallet_balance_with_tuple_error():
         print(f"⚠️ Error fetching last wallet balance: {e}")
         return 0.000, None
 
+# def get_last_wallet_balance():
+#     """Return the last BTC wallet balance as a float (safe)."""
+#     conn = get_mysql_connection()
+#     try:
+#         cursor = conn.cursor()
+#         cursor.execute("""
+#             SELECT balance_after 
+#             FROM wallet_transactions
+#             ORDER BY trade_time DESC
+#             LIMIT 1
+#         """)
+#         row = cursor.fetchone()
+#         if row:
+#             # row may be tuple or dict depending on cursor type
+#             if isinstance(row, tuple):
+#                 return float(row[0] or 0)
+#             if isinstance(row, dict):
+#                 return float(row.get("balance_after", 0) or 0)
+#         return 0.0
+#     finally:
+#         conn.close()
+
 def get_last_wallet_balance():
-    """Return the last BTC wallet balance as a float (safe)."""
+    """
+    Fetch the last BTC balance and trade_time from wallet_transactions.
+    Always returns a tuple: (balance_btc, last_trade_time).
+    If no rows exist, returns (0.0, None).
+    """
     conn = get_mysql_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT balance_after 
+            SELECT balance_btc, trade_time
             FROM wallet_transactions
             ORDER BY trade_time DESC
             LIMIT 1
         """)
         row = cursor.fetchone()
-        if row:
-            # row may be tuple or dict depending on cursor type
-            if isinstance(row, tuple):
-                return float(row[0] or 0)
-            if isinstance(row, dict):
-                return float(row.get("balance_after", 0) or 0)
-        return 0.0
-    finally:
+        cursor.close()
         conn.close()
+
+        if row:
+            balance_btc = float(row[0]) if row[0] is not None else 0.0
+            last_trade_time = row[1]
+            return balance_btc, last_trade_time
+        else:
+            return 0.0, None
+    except Exception as e:
+        # Optional: log error
+        print(f"❌ Error in get_last_wallet_balance: {e}")
+        return 0.0, None
 
 
 # Initialize session state for BTC wallet
