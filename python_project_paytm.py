@@ -752,7 +752,44 @@ def log_wallet_transaction_25_08_2025(action, amount, balance, price_inr, trade_
     conn.commit()
     conn.close()
 
+# def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUAL"):
+#     conn = get_mysql_connection()
+#     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+#     cursor.execute("""
+#         INSERT INTO wallet_transactions 
+#         (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, status)
+#         VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s)
+#     """, (
+#         action,
+#         amount,
+#         balance,
+#         balance * price_inr,
+#         trade_type,
+#         bool(st.session_state.get("AUTO_TRADING", {}).get("active", False)),
+#         "SUCCESS"   # ✅ explicitly set
+#     ))
+#     conn.commit()
+#     conn.close()
+
 def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUAL"):
+    # --- sanitize values ---
+    try:
+        amount = float(amount or 0)
+    except Exception:
+        amount = 0.0
+
+    try:
+        balance = float(balance or 0)
+    except Exception:
+        balance = 0.0
+
+    try:
+        price_inr = float(price_inr or 0)
+    except Exception:
+        price_inr = 0.0
+
+    inr_value = balance * price_inr
+
     conn = get_mysql_connection()
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("""
@@ -760,13 +797,13 @@ def log_wallet_transaction(action, amount, balance, price_inr, trade_type="MANUA
         (trade_time, action, amount, balance_after, inr_value, trade_type, autotrade_active, status)
         VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s)
     """, (
-        action,
+        str(action),
         amount,
         balance,
-        balance * price_inr,
-        trade_type,
+        inr_value,
+        str(trade_type),
         bool(st.session_state.get("AUTO_TRADING", {}).get("active", False)),
-        "SUCCESS"   # ✅ explicitly set
+        "SUCCESS"
     ))
     conn.commit()
     conn.close()
