@@ -1165,8 +1165,14 @@ def check_auto_trading(price_inr: float):
             st.session_state["autotrade_toggle"] = False
             update_autotrade_status_db(0)
 
-            btc_bal = st.session_state.BTC_WALLET.get('balance', 0.0)
-            inr_bal = st.session_state.INR_WALLET.get('balance', 0.0)
+            # btc_bal = st.session_state.BTC_WALLET.get('balance', 0.0)
+            # inr_bal = st.session_state.INR_WALLET.get('balance', 0.0)
+            btc_bal = get_last_wallet_balance()
+            inr_bal = get_last_inr_balance()
+
+            # also sync into session_state for UI consistency
+            st.session_state.BTC_WALLET["balance"] = btc_bal
+            st.session_state.INR_WALLET["balance"] = inr_bal
             log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
             log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
             update_wallet_daily_summary(auto_end=True)
@@ -1189,8 +1195,15 @@ def check_auto_trading(price_inr: float):
         last_price = st.session_state.AUTO_TRADING.get("last_price", 0)
         price_diff = price_inr - last_price if last_price else 0
 
-        btc_balance = st.session_state.BTC_WALLET.get("balance", 0)
-        inr_balance = st.session_state.INR_WALLET.get("balance", 0)
+        btc_balance = get_last_wallet_balance()
+        inr_balance = get_last_inr_balance()
+
+        # keep session_state in sync for UI
+        st.session_state.BTC_WALLET["balance"] = btc_balance
+        st.session_state.INR_WALLET["balance"] = inr_balance
+
+        # btc_balance = st.session_state.BTC_WALLET.get("balance", 0)
+        # inr_balance = st.session_state.INR_WALLET.get("balance", 0)
 
         # === AUTO-BUY ===
         if btc_balance == 0 and inr_balance >= 20:
