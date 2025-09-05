@@ -321,7 +321,7 @@ def usd_to_inr(usd):
 
 # --- Simulated/Real Wallet Balances ---
 
-def get_last_inr_balance():
+def get_last_inr_balance_with_tuple_error():
     conn = get_mysql_connection()
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("SELECT balance_after FROM inr_wallet_transactions WHERE trade_mode = %s ORDER BY trade_time DESC LIMIT 1", 
@@ -331,6 +331,27 @@ def get_last_inr_balance():
     # return float(result['balance_after']) if result else 10000.0
     return float(result['balance_after']) if result and result['balance_after'] is not None else 10000.0
     # return float(result[0]) if result else 10000.0
+
+def get_last_inr_balance():
+    """Return the last INR wallet balance as a float (safe)."""
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT balance_after 
+            FROM inr_wallet_transactions
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        if row:
+            if isinstance(row, tuple):
+                return float(row[0] or 0)
+            if isinstance(row, dict):
+                return float(row.get("balance_after", 0) or 0)
+        return 0.0
+    finally:
+        conn.close()
 
 INR_WALLET = {"balance": get_last_inr_balance()}
 # INR_WALLET =  {"balance": 10000.00}
@@ -625,7 +646,7 @@ def get_autotrade_active_from_db() -> bool:
     finally:
         conn.close()
         
-def get_last_wallet_balance():
+def get_last_wallet_balance_with_tuple_error():
     try:
         conn = get_mysql_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -650,6 +671,29 @@ def get_last_wallet_balance():
     except Exception as e:
         print(f"⚠️ Error fetching last wallet balance: {e}")
         return 0.000, None
+
+def get_last_wallet_balance():
+    """Return the last BTC wallet balance as a float (safe)."""
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT balance_after 
+            FROM wallet_transactions
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        if row:
+            # row may be tuple or dict depending on cursor type
+            if isinstance(row, tuple):
+                return float(row[0] or 0)
+            if isinstance(row, dict):
+                return float(row.get("balance_after", 0) or 0)
+        return 0.0
+    finally:
+        conn.close()
+
 
 # Initialize session state for BTC wallet
 print("REAL_TRADING =", REAL_TRADING)
@@ -1213,6 +1257,7 @@ def get_last_auto_trade():
         return row if row else None
     finally:
         conn.close()
+        
         
 def check_auto_trading(price_inr: float):
     """
