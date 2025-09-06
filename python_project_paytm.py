@@ -2433,7 +2433,20 @@ with wallet_col1:
     st.metric("BTC Balance", f"{BTC_WALLET['balance']:.4f} BTC")
 with wallet_col2:
     st.metric("INR Value", f"₹{BTC_WALLET['balance'] * price_inr:,.2f}")
-    st.metric("INR Wallet Balance", f"₹{INR_WALLET['balance']:,.2f}")
+
+    balance = INR_WALLET.get("balance", 0)
+
+    # If it's a tuple, pick first element
+    if isinstance(balance, tuple):
+        balance = balance[0] if balance else 0
+
+    try:
+        balance = float(balance)
+    except (TypeError, ValueError):
+        balance = 0
+
+    st.metric("INR Wallet Balance", f"₹{balance:,.2f}")
+    # st.metric("INR Wallet Balance", f"₹{INR_WALLET['balance']:,.2f}")
 
 # --- Transaction History ---
 with st.expander("📒 INR Wallet History"):
