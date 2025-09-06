@@ -1217,7 +1217,7 @@ def check_auto_trading_old_with_updated(price_inr):
         send_telegram(error_msg)
 
 
-def get_last_trade_time_from_db():
+def get_last_trade_time_from_db_with_float_error():
     """
     Return the last AUTO trade time as an integer epoch (seconds),
     or None if no AUTO trades exist.
@@ -1269,6 +1269,36 @@ def get_last_trade_time_from_db():
             conn.close()
         except Exception:
             pass
+
+def get_last_trade_time_from_db():
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT trade_time
+            FROM wallet_transactions
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """)
+        row = cursor.fetchone()
+        if row and row[0]:
+            trade_time = row[0]
+
+            # 🔹 Normalize type
+            if isinstance(trade_time, float):  # stored as UNIX timestamp
+                return datetime.datetime.fromtimestamp(trade_time)
+            elif isinstance(trade_time, (int,)):  # if accidentally integer
+                return datetime.datetime.fromtimestamp(trade_time)
+            elif isinstance(trade_time, str):  # stored as string
+                try:
+                    return datetime.datetime.fromisoformat(trade_time)
+                except ValueError:
+                    return None
+            else:
+                return trade_time  # already a datetime
+        return None
+    finally:
+        conn.close()
 
 def get_last_auto_trade():
     conn = get_mysql_connection()
@@ -2345,8 +2375,14 @@ if not REAL_TRADING:
     with col_test2:
         st.metric("INR Value", f"₹{BTC_WALLET['balance'] * price_inr:,.2f}")
 
+    # if last_trade_time:
+    #     st.caption(f"📅 Last transaction: {last_trade_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    last_trade_time = get_last_trade_time_from_db()
     if last_trade_time:
         st.caption(f"📅 Last transaction: {last_trade_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        st.caption("📅 No transactions yet")
 
     if st.button("🔄 Reset Test Wallet to 0.005 BTC"):
         BTC_WALLET['balance'] = 0.005
