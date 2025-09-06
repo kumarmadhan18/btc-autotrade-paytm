@@ -1319,7 +1319,7 @@ def get_last_auto_trade():
         
 def check_auto_trading(price_inr: float):
     """
-    Full Auto-Trading Logic:
+    Full Auto-Trading Logic (SAFE):
     - Strict BUY→SELL sequence (no duplicate/cumulative trades).
     - Auto-BUY if INR>0 and last trade was SELL/None.
     - Auto-SELL with multiple conditions (ROI, force, fallback).
@@ -1331,10 +1331,12 @@ def check_auto_trading(price_inr: float):
     try:
         # --- Ensure wallets exist in session ---
         if "BTC_WALLET" not in st.session_state:
-            btc_bal, _ = get_last_wallet_balance()
+            res = get_last_wallet_balance()
+            btc_bal = res[0] if isinstance(res, tuple) else res
             st.session_state.BTC_WALLET = {"balance": float(btc_bal or 0)}
         if "INR_WALLET" not in st.session_state:
-            inr_bal, _ = get_last_inr_balance()
+            res = get_last_inr_balance()
+            inr_bal = res[0] if isinstance(res, tuple) else res
             st.session_state.INR_WALLET = {"balance": float(inr_bal or 0)}
 
         btc_balance = float(st.session_state.BTC_WALLET.get("balance", 0.0) or 0.0)
@@ -1342,7 +1344,9 @@ def check_auto_trading(price_inr: float):
 
         # --- Ensure AUTO_TRADING state ---
         if "AUTO_TRADING" not in st.session_state:
-            st.session_state.AUTO_TRADING = {"active": True, "entry_price": 0, "last_price": 0, "last_trade": None}
+            st.session_state.AUTO_TRADING = {
+                "active": True, "entry_price": 0, "last_price": 0, "last_trade": None
+            }
 
         # --- Active check ---
         db_active = get_autotrade_active_from_db()
@@ -1354,28 +1358,41 @@ def check_auto_trading(price_inr: float):
         # --- Idle timeout check ---
         idle_timeout = 1800  # 30 min
         last_trade_time = get_last_trade_time_from_db()
-        if last_trade_time and (time.time() - last_trade_time) > idle_timeout:
-            st.session_state.AUTO_TRADING["active"] = False
-            st.session_state["autotrade_toggle"] = False
-            update_autotrade_status_db(0)
+        if last_trade_time and isinstance(last_trade_time, (int, float)):
+            # convert epoch → datetime
+            last_trade_time = datetime.fromtimestamp(last_trade_time)
 
-            btc_bal, _ = get_last_wallet_balance()
-            inr_bal, _ = get_last_inr_balance()
+        if last_trade_time and isinstance(last_trade_time, datetime):
+            if (datetime.now() - last_trade_time).total_seconds() > idle_timeout:
+                st.session_state.AUTO_TRADING["active"] = False
+                st.session_state["autotrade_toggle"] = False
+                update_autotrade_status_db(0)
 
-            st.session_state.BTC_WALLET["balance"] = btc_bal
-            st.session_state.INR_WALLET["balance"] = inr_bal
-            log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
-            log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
-            update_wallet_daily_summary(auto_end=True)
+                res1 = get_last_wallet_balance()
+                btc_bal = res1[0] if isinstance(res1, tuple) else res1
+                res2 = get_last_inr_balance()
+                inr_bal = res2[0] if isinstance(res2, tuple) else res2
 
-            msg = "⏳ Auto-Trade stopped (idle timeout: 30m no trades)."
-            st.warning(msg); send_telegram(msg)
-            return
+                st.session_state.BTC_WALLET["balance"] = btc_bal
+                st.session_state.INR_WALLET["balance"] = inr_bal
+                log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
+                log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
+                update_wallet_daily_summary(auto_end=True)
+
+                msg = "⏳ Auto-Trade stopped (idle timeout: 30m no trades)."
+                st.warning(msg); send_telegram(msg)
+                return
 
         # --- Trade cooldown check ---
         last_trade = get_last_auto_trade()
         last_type = last_trade.get("trade_type") if last_trade else None
-        last_ts = int(last_trade["trade_time"].timestamp()) if last_trade and last_trade.get("trade_time") else 0
+        last_ts = 0
+        if last_trade and last_trade.get("trade_time"):
+            if isinstance(last_trade["trade_time"], datetime):
+                last_ts = int(last_trade["trade_time"].timestamp())
+            elif isinstance(last_trade["trade_time"], (int, float)):
+                last_ts = int(last_trade["trade_time"])
+
         now_ts = int(time.time())
         trade_cooldown = 60
         if last_type in ("AUTO_BUY", "AUTO_SELL") and (now_ts - last_ts < trade_cooldown):
@@ -1459,8 +1476,11 @@ def check_auto_trading(price_inr: float):
         st.session_state["autotrade_toggle"] = False
         update_autotrade_status_db(0)
 
-        btc_bal, _ = get_last_wallet_balance()
-        inr_bal, _ = get_last_inr_balance()
+        res1 = get_last_wallet_balance()
+        btc_bal = res1[0] if isinstance(res1, tuple) else res1
+        res2 = get_last_inr_balance()
+        inr_bal = res2[0] if isinstance(res2, tuple) else res2
+
         log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
         log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
         update_wallet_daily_summary(auto_end=True)
