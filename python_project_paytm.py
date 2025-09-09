@@ -1315,8 +1315,36 @@ def get_last_auto_trade():
         return row if row else None
     finally:
         conn.close()
+    
+def start_autotrade():
+    try:
+        # ✅ Load balances using your existing functions
+        btc_balance, _ = get_last_wallet_balance()
+        inr_balance, _ = get_last_inr_balance()
+
+        if btc_balance is None:
+            btc_balance = 0.0
+        if inr_balance is None:
+            inr_balance = 0.0
+
+        # ✅ Save into session without resetting
+        st.session_state["BTC_WALLET"] = {"balance": btc_balance}
+        st.session_state["INR_WALLET"] = {"balance": inr_balance}
+
+        # ✅ Log marker in DB
+        log_wallet_transaction(
+            trade_type="AUTO_TRADE_START",
+            inr_change=0,
+            btc_change=0,
+            remarks="Auto-trade started"
+        )
+
+        st.success(f"🚀 Auto-Trade ACTIVATED at ₹{inr_balance:,.2f} | ₿{btc_balance:.6f}")
+
+    except Exception as e:
+        st.error(f"❌ Failed to start Auto-Trade: {e}")
         
-def start_auto_trading():
+def start_auto_trading_old():
     """Mark auto-trade as active without resetting balances"""
     conn = get_mysql_connection()
     try:
@@ -1423,35 +1451,65 @@ def check_auto_trading(price_inr: float):
         if not autotrade_active:
             return
 
-        # --- Idle timeout check ---
+       # --- Idle timeout check ---
         idle_timeout = 1800  # 30 min
         last_trade_time = get_last_trade_time_from_db()
-        if last_trade_time and (time.time() - last_trade_time) > idle_timeout:
-            st.session_state.AUTO_TRADING["active"] = False
-            st.session_state["autotrade_toggle"] = False
-            update_autotrade_status_db(0)
 
-            btc_bal, _ = get_last_wallet_balance()
-            inr_bal, _ = get_last_inr_balance()
+        if last_trade_time:
+            # Normalize last_trade_time into datetime
+            if isinstance(last_trade_time, (int, float)):
+                last_trade_time = datetime.fromtimestamp(last_trade_time)
+            elif isinstance(last_trade_time, str):
+                try:
+                    last_trade_time = datetime.fromisoformat(last_trade_time)
+                except ValueError:
+                    last_trade_time = None
 
-            st.session_state.BTC_WALLET["balance"] = btc_bal
-            st.session_state.INR_WALLET["balance"] = inr_bal
-            log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
-            log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
-            update_wallet_daily_summary(auto_end=True)
+        if last_trade_time and isinstance(last_trade_time, datetime):
+            if (datetime.now() - last_trade_time).total_seconds() > idle_timeout:
+                st.session_state.AUTO_TRADING["active"] = False
+                st.session_state["autotrade_toggle"] = False
+                update_autotrade_status_db(0)
 
-            msg = "⏳ Auto-Trade stopped (idle timeout: 30m no trades)."
-            st.warning(msg); send_telegram(msg)
-            return
+                res1 = get_last_wallet_balance()
+                btc_bal = res1[0] if isinstance(res1, tuple) else res1
+                res2 = get_last_inr_balance()
+                inr_bal = res2[0] if isinstance(res2, tuple) else res2
+
+                st.session_state.BTC_WALLET["balance"] = btc_bal
+                st.session_state.INR_WALLET["balance"] = inr_bal
+                log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
+                log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
+                update_wallet_daily_summary(auto_end=True)
+
+                msg = "⏳ Auto-Trade stopped (idle timeout: 30m no trades)."
+                st.warning(msg); send_telegram(msg)
+                return
 
         # --- Trade cooldown check ---
         last_trade = get_last_auto_trade()
         last_type = last_trade.get("trade_type") if last_trade else None
-        last_ts = int(last_trade["trade_time"].timestamp()) if last_trade and last_trade.get("trade_time") else 0
+        last_ts = 0
+
+        if last_trade and last_trade.get("trade_time"):
+            trade_time_val = last_trade["trade_time"]
+
+            # Normalize trade_time_val → timestamp int
+            if isinstance(trade_time_val, datetime):
+                last_ts = int(trade_time_val.timestamp())
+            elif isinstance(trade_time_val, (int, float)):
+                last_ts = int(trade_time_val)
+            elif isinstance(trade_time_val, str):
+                try:
+                    last_ts = int(datetime.fromisoformat(trade_time_val).timestamp())
+                except ValueError:
+                    last_ts = 0
+
         now_ts = int(time.time())
         trade_cooldown = 60
         if last_type in ("AUTO_BUY", "AUTO_SELL") and (now_ts - last_ts < trade_cooldown):
             return  # prevent duplicate fast trades
+
 
         # --- Restore last_trade state into session ---
         if st.session_state.AUTO_TRADING.get("last_trade") is None:
