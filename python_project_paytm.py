@@ -290,10 +290,10 @@ def migrate_postgres_tables():
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INTEGER USING autotrade_active::integer, ALTER COLUMN autotrade_active SET DEFAULT 0;")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING (is_autotrade_marker::INTEGER <> 0);")
-    # cursor.execute("TRUNCATE wallet_history;")
-    # cursor.execute("TRUNCATE wallet_transactions;")
-    # cursor.execute("TRUNCATE inr_wallet_transactions;")
-    # cursor.execute("TRUNCATE user_wallets;")
+    cursor.execute("TRUNCATE wallet_history;")
+    cursor.execute("TRUNCATE wallet_transactions;")
+    cursor.execute("TRUNCATE inr_wallet_transactions;")
+    cursor.execute("TRUNCATE user_wallets;")
 
     conn.commit()
     cursor.close()
@@ -1318,18 +1318,25 @@ def get_last_auto_trade():
     
 def start_autotrade():
     try:
-        # ✅ Load balances using your existing functions
-        btc_balance, _ = get_last_wallet_balance()
-        inr_balance, _ = get_last_inr_balance()
+        # ✅ Load balances from DB (mode-aware)
+        btc_balance, _ = get_last_wallet_balance(mode="LIVE" if REAL_TRADING else "TEST")
+        inr_balance, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
 
-        if btc_balance is None:
-            btc_balance = 0.0
-        if inr_balance is None:
-            inr_balance = 0.0
+        btc_balance = float(btc_balance or 0.0)
+        inr_balance = float(inr_balance or 0.0)
 
-        # ✅ Save into session without resetting
+        # ✅ Save into session safely
         st.session_state["BTC_WALLET"] = {"balance": btc_balance}
         st.session_state["INR_WALLET"] = {"balance": inr_balance}
+
+        # ✅ Init AUTO_TRADING state
+        st.session_state.AUTO_TRADING = {
+            "active": True,
+            "entry_price": 0,
+            "last_price": 0,
+            "last_trade": None
+        }
+        st.session_state["autotrade_toggle"] = True
 
         # ✅ Log marker in DB
         log_wallet_transaction(
@@ -1339,10 +1346,31 @@ def start_autotrade():
             remarks="Auto-trade started"
         )
 
-        st.success(f"🚀 Auto-Trade ACTIVATED at ₹{inr_balance:,.2f} | ₿{btc_balance:.6f}")
+        msg = f"🚀 Auto-Trade ACTIVATED at ₹{inr_balance:,.2f} | ₿{btc_balance:.6f}"
+        st.success(msg); st.toast(msg); send_telegram(msg)
 
     except Exception as e:
-        st.error(f"❌ Failed to start Auto-Trade: {e}")
+        stop_autotrade(f"❌ Failed to start Auto-Trade: {e}")
+
+def stop_autotrade(message: str):
+    """Centralized stop logic (prevents balance reset)."""
+    st.session_state.AUTO_TRADING["active"] = False
+    st.session_state["autotrade_toggle"] = False
+    update_autotrade_status_db(0)
+
+    # Reload balances safely
+    btc_bal, _ = get_last_wallet_balance(mode="LIVE" if REAL_TRADING else "TEST")
+    inr_bal, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+
+    st.session_state.BTC_WALLET = {"balance": float(btc_bal or 0.0)}
+    st.session_state.INR_WALLET = {"balance": float(inr_bal or 0.0)}
+
+    log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
+    log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
+    update_wallet_daily_summary(auto_end=True)
+
+    st.warning(message)
+    send_telegram(message)
         
 def start_auto_trading_old():
     """Mark auto-trade as active without resetting balances"""
@@ -1414,35 +1442,29 @@ def check_auto_trading(price_inr: float):
     - Auto-stop + notifications on error or idle.
     """
     try:
-        # --- Ensure wallets exist in session ---
-        if "BTC_WALLET" not in st.session_state:
-            btc_bal, _ = get_last_wallet_balance()
-            st.session_state.BTC_WALLET = {"balance": float(btc_bal or 0)}
-        if "INR_WALLET" not in st.session_state:
-            inr_bal, _ = get_last_inr_balance()
-            st.session_state.INR_WALLET = {"balance": float(inr_bal or 0)}
+        # --- Ensure AUTO_TRADING state in session ---
+        if "AUTO_TRADING" not in st.session_state:
+            st.session_state.AUTO_TRADING = {
+                "active": True,
+                "entry_price": 0,
+                "last_price": 0,
+                "last_trade": None
+            }
 
-        btc_balance = float(st.session_state.BTC_WALLET.get("balance", 0.0) or 0.0)
-        inr_balance = float(st.session_state.INR_WALLET.get("balance", 0.0) or 0.0)
+        # --- Always refresh balances from DB (mode-aware) ---
+        btc_balance, _ = get_last_wallet_balance(mode="LIVE" if REAL_TRADING else "TEST")
+        inr_balance, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+
+        btc_balance = float(btc_balance or 0.0)
+        inr_balance = float(inr_balance or 0.0)
+
+        st.session_state.BTC_WALLET = {"balance": btc_balance}
+        st.session_state.INR_WALLET = {"balance": inr_balance}
 
         # 🚨 Stop autotrade immediately if both wallets are empty
         if btc_balance == 0 and inr_balance == 0:
-            st.session_state.AUTO_TRADING["active"] = False
-            st.session_state["autotrade_toggle"] = False
-            update_autotrade_status_db(0)
-
-            log_wallet_transaction("AUTO_STOP", 0, 0, 0, "AUTO_TRADE_STOP")
-            log_inr_transaction("AUTO_STOP", 0, 0, "LIVE" if REAL_TRADING else "TEST")
-            update_wallet_daily_summary(auto_end=True)
-
-            msg = "⏹️ Auto-Trade stopped: Both INR and BTC wallets are empty."
-            st.warning(msg)
-            send_telegram(msg)
+            stop_autotrade("⏹️ Auto-Trade stopped: Both INR and BTC wallets are empty.")
             return
-
-        # --- Ensure AUTO_TRADING state ---
-        if "AUTO_TRADING" not in st.session_state:
-            st.session_state.AUTO_TRADING = {"active": True, "entry_price": 0, "last_price": 0, "last_trade": None}
 
         # --- Active check ---
         db_active = get_autotrade_active_from_db()
@@ -1451,12 +1473,10 @@ def check_auto_trading(price_inr: float):
         if not autotrade_active:
             return
 
-       # --- Idle timeout check ---
-        idle_timeout = 1800  # 30 min
+        # --- Idle timeout check (30m) ---
+        idle_timeout = 1800
         last_trade_time = get_last_trade_time_from_db()
-
         if last_trade_time:
-            # Normalize last_trade_time into datetime
             if isinstance(last_trade_time, (int, float)):
                 last_trade_time = datetime.fromtimestamp(last_trade_time)
             elif isinstance(last_trade_time, str):
@@ -1467,34 +1487,15 @@ def check_auto_trading(price_inr: float):
 
         if last_trade_time and isinstance(last_trade_time, datetime):
             if (datetime.now() - last_trade_time).total_seconds() > idle_timeout:
-                st.session_state.AUTO_TRADING["active"] = False
-                st.session_state["autotrade_toggle"] = False
-                update_autotrade_status_db(0)
-
-                res1 = get_last_wallet_balance()
-                btc_bal = res1[0] if isinstance(res1, tuple) else res1
-                res2 = get_last_inr_balance()
-                inr_bal = res2[0] if isinstance(res2, tuple) else res2
-
-                st.session_state.BTC_WALLET["balance"] = btc_bal
-                st.session_state.INR_WALLET["balance"] = inr_bal
-                log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
-                log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
-                update_wallet_daily_summary(auto_end=True)
-
-                msg = "⏳ Auto-Trade stopped (idle timeout: 30m no trades)."
-                st.warning(msg); send_telegram(msg)
+                stop_autotrade("⏳ Auto-Trade stopped (idle timeout: 30m no trades).")
                 return
 
-        # --- Trade cooldown check ---
+        # --- Trade cooldown check (60s) ---
         last_trade = get_last_auto_trade()
         last_type = last_trade.get("trade_type") if last_trade else None
         last_ts = 0
-
         if last_trade and last_trade.get("trade_time"):
             trade_time_val = last_trade["trade_time"]
-
-            # Normalize trade_time_val → timestamp int
             if isinstance(trade_time_val, datetime):
                 last_ts = int(trade_time_val.timestamp())
             elif isinstance(trade_time_val, (int, float)):
@@ -1506,12 +1507,10 @@ def check_auto_trading(price_inr: float):
                     last_ts = 0
 
         now_ts = int(time.time())
-        trade_cooldown = 60
-        if last_type in ("AUTO_BUY", "AUTO_SELL") and (now_ts - last_ts < trade_cooldown):
+        if last_type in ("AUTO_BUY", "AUTO_SELL") and (now_ts - last_ts < 60):
             return  # prevent duplicate fast trades
 
-
-        # --- Restore last_trade state into session ---
+        # --- Restore last_trade state ---
         if st.session_state.AUTO_TRADING.get("last_trade") is None:
             if last_type == "AUTO_BUY":
                 st.session_state.AUTO_TRADING["last_trade"] = "BUY"
@@ -1548,9 +1547,9 @@ def check_auto_trading(price_inr: float):
 
         # === AUTO-SELL CONDITIONS ===
         roi = ((price_inr - entry_price) / entry_price) * 100 if entry_price > 0 else None
-        cond1 = (roi is not None and roi >= min_roi and price_diff >= threshold)  # ROI SELL
-        cond2 = (inr_balance <= 0 and btc_balance > 0)                            # FORCE SELL (INR empty)
-        cond3 = (entry_price == 0 and btc_balance > 0)                            # fallback SELL
+        cond1 = (roi is not None and roi >= min_roi and price_diff >= threshold)
+        cond2 = (inr_balance <= 0 and btc_balance > 0)
+        cond3 = (entry_price == 0 and btc_balance > 0)
 
         if btc_balance >= 0.0001 and (last_trade_state == "BUY") and (cond1 or cond2 or cond3):
             sell_btc = btc_balance
@@ -2556,27 +2555,57 @@ with col3:
         log_wallet_transaction("RESET", 0, BTC_WALLET['balance'], price_inr, trade_type="MANUAL_RESET_BALANCE")
         update_wallet_daily_summary(start=False)
 
+# # --- Wallet Status OLD---
+# st.write("### 💼 Wallet Status")
+# wallet_col1, wallet_col2 = st.columns(2)
+# with wallet_col1:
+#     st.metric("BTC Balance", f"{BTC_WALLET['balance']:.4f} BTC")
+# with wallet_col2:
+#     st.metric("INR Value", f"₹{BTC_WALLET['balance'] * price_inr:,.2f}")
+
+#     balance = INR_WALLET.get("balance", 0)
+
+#     # If it's a tuple, pick first element
+#     if isinstance(balance, tuple):
+#         balance = balance[0] if balance else 0
+
+#     try:
+#         balance = float(balance)
+#     except (TypeError, ValueError):
+#         balance = 0
+
+#     st.metric("INR Wallet Balance", f"₹{balance:,.2f}")
+    # st.metric("INR Wallet Balance", f"₹{INR_WALLET['balance']:,.2f}")
+
 # --- Wallet Status ---
 st.write("### 💼 Wallet Status")
 wallet_col1, wallet_col2 = st.columns(2)
+
+# --- BTC Wallet ---
+btc_balance = st.session_state.get("BTC_WALLET", {}).get("balance", 0.0)
+try:
+    btc_balance = float(btc_balance)
+except (TypeError, ValueError):
+    btc_balance = 0.0
+
 with wallet_col1:
-    st.metric("BTC Balance", f"{BTC_WALLET['balance']:.4f} BTC")
+    st.metric("BTC Balance", f"{btc_balance:.6f} BTC")
+
+# --- INR Wallet ---
+inr_balance = st.session_state.get("INR_WALLET", {}).get("balance", 0.0)
+
+# Handle tuple case safely
+if isinstance(inr_balance, tuple):
+    inr_balance = inr_balance[0] if inr_balance else 0
+
+try:
+    inr_balance = float(inr_balance)
+except (TypeError, ValueError):
+    inr_balance = 0.0
+
 with wallet_col2:
-    st.metric("INR Value", f"₹{BTC_WALLET['balance'] * price_inr:,.2f}")
-
-    balance = INR_WALLET.get("balance", 0)
-
-    # If it's a tuple, pick first element
-    if isinstance(balance, tuple):
-        balance = balance[0] if balance else 0
-
-    try:
-        balance = float(balance)
-    except (TypeError, ValueError):
-        balance = 0
-
-    st.metric("INR Wallet Balance", f"₹{balance:,.2f}")
-    # st.metric("INR Wallet Balance", f"₹{INR_WALLET['balance']:,.2f}")
+    st.metric("INR Wallet Balance", f"₹{inr_balance:,.2f}")
+    st.metric("INR Value of BTC", f"₹{btc_balance * price_inr:,.2f}")
 
 # --- Transaction History ---
 with st.expander("📒 INR Wallet History"):
