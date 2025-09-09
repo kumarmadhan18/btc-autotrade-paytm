@@ -332,9 +332,9 @@ def get_last_inr_balance_with_tuple_error():
     return float(result['balance_after']) if result and result['balance_after'] is not None else 10000.0
     # return float(result[0]) if result else 10000.0
 
-def get_last_inr_balance():
+def get_last_inr_balance(mode: str):
     """
-    Returns the last INR balance and trade_time.
+    Returns the last INR balance and trade_time for the given mode.
     Always returns a tuple: (balance: float, trade_time: float or None)
     """
     conn = get_mysql_connection()
@@ -343,10 +343,10 @@ def get_last_inr_balance():
         cursor.execute("""
             SELECT balance_after, EXTRACT(EPOCH FROM trade_time) AS ts
             FROM inr_wallet_transactions
-            WHERE status = 'SUCCESS'
+            WHERE status = 'SUCCESS' AND mode = %s
             ORDER BY trade_time DESC
             LIMIT 1
-        """)
+        """, (mode,))
         row = cursor.fetchone()
         if row:
             balance = float(row.get("balance_after") or 0.0)
@@ -698,9 +698,9 @@ def get_last_wallet_balance_with_tuple_error():
 #     finally:
 #         conn.close()
 
-def get_last_wallet_balance():
+def get_last_wallet_balance(mode: str):
     """
-    Returns the last BTC balance and trade_time.
+    Returns the last BTC balance and trade_time for the given mode.
     Always returns a tuple: (balance: float, trade_time: float or None)
     """
     conn = get_mysql_connection()
@@ -709,10 +709,10 @@ def get_last_wallet_balance():
         cursor.execute("""
             SELECT balance_after, EXTRACT(EPOCH FROM trade_time) AS ts
             FROM wallet_transactions
-            WHERE status = 'SUCCESS'
+            WHERE status = 'SUCCESS' AND mode = %s
             ORDER BY trade_time DESC
             LIMIT 1
-        """)
+        """, (mode,))
         row = cursor.fetchone()
         if row:
             balance = float(row.get("balance_after") or 0.0)
