@@ -353,11 +353,15 @@ def get_last_inr_balance(mode: str):
             ts = float(row.get("ts") or 0.0)
             return balance, ts
         else:
-            return 0.0, None
+            return 10000.0, None
     finally:
         conn.close()
 
-INR_WALLET = {"balance": get_last_inr_balance()}
+# inr_balance, _ = get_last_inr_balance(mode)
+inr_balance, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+
+# INR_WALLET = {"balance": get_last_inr_balance()}
+INR_WALLET = {"balance": inr_balance}
 # INR_WALLET =  {"balance": 10000.00}
 # INR_WALLET = {"balance": get_razorpay_balance()}
 
@@ -723,8 +727,12 @@ def get_last_wallet_balance(mode: str):
     finally:
         conn.close()
 
-# Initialize session state for BTC wallet
+
+# ---------------- Wallet Initialization ----------------
 print("REAL_TRADING =", REAL_TRADING)
+
+# Derive mode based on REAL_TRADING flag
+mode = "LIVE" if REAL_TRADING else "TEST"
 
 if REAL_TRADING:
     try:
@@ -734,8 +742,8 @@ if REAL_TRADING:
     BALANCE_BTC = wallet.balance() / 1e8
     last_trade_time = None
 else:
-    print("Fetching last wallet balance from DB")
-    BALANCE_BTC, last_trade_time = get_last_wallet_balance()
+    print(f"Fetching last wallet balance from DB (mode={mode})")
+    BALANCE_BTC, last_trade_time = get_last_wallet_balance(mode)
     print(f"Test Balance: {BALANCE_BTC}, Last Trade Time: {last_trade_time}")
 
 BTC_WALLET = {"balance": BALANCE_BTC}
