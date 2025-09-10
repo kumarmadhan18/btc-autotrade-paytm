@@ -240,7 +240,7 @@ def init_mysql_tables():
     conn.close()
     st.success("✅ PostgreSQL tables initialized successfully!")
     
-init_mysql_tables()
+# init_mysql_tables()
 
 def migrate_postgres_tables():
     conn = get_mysql_connection()
@@ -292,20 +292,20 @@ def migrate_postgres_tables():
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN trade_time SET DEFAULT CURRENT_TIMESTAMP;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE BOOLEAN USING (autotrade_active::INTEGER <> 0);")
     cursor.execute("ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS mode VARCHAR(10) DEFAULT 'TEST';")
-    # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INTEGER USING autotrade_active::integer, ALTER COLUMN autotrade_active SET DEFAULT 0;")
-    # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING (is_autotrade_marker::INTEGER <> 0);")
-    cursor.execute("TRUNCATE wallet_history;")
-    cursor.execute("TRUNCATE wallet_transactions;")
-    cursor.execute("TRUNCATE inr_wallet_transactions;")
-    cursor.execute("TRUNCATE user_wallets;")
+
+#------ Temprary Cleaning purpose ------##
+    # cursor.execute("TRUNCATE wallet_history;")
+    # cursor.execute("TRUNCATE wallet_transactions;")
+    # cursor.execute("TRUNCATE inr_wallet_transactions;")
+    # cursor.execute("TRUNCATE user_wallets;")
 
     conn.commit()
     cursor.close()
     conn.close()
     st.success("✅ Migration completed! All tables updated with safe defaults.")
 
-migrate_postgres_tables()
+# migrate_postgres_tables()
 
 def get_btc_price():
     try:
