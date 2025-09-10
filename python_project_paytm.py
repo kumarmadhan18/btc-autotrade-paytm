@@ -210,7 +210,9 @@ def init_mysql_tables():
         total_deposit_inr DOUBLE PRECISION DEFAULT 0,
         total_btc_received DOUBLE PRECISION DEFAULT 0,
         total_btc_sent DOUBLE PRECISION DEFAULT 0,
-        profit_inr DOUBLE PRECISION DEFAULT 0
+        profit_inr DOUBLE PRECISION DEFAULT 0,
+        mode VARCHAR(10) DEFAULT 'TEST'
+
     )
     """)
 
@@ -228,7 +230,8 @@ def init_mysql_tables():
         status VARCHAR(20) DEFAULT 'PENDING',
         reversal_id VARCHAR(50) DEFAULT '',
         is_autotrade_marker BOOLEAN DEFAULT FALSE,
-        last_price DOUBLE PRECISION DEFAULT 0
+        last_price DOUBLE PRECISION DEFAULT 0,
+        mode VARCHAR(10) DEFAULT 'TEST'
     )
     """)
 
@@ -249,6 +252,7 @@ def migrate_postgres_tables():
     cursor.execute("ALTER TABLE inr_wallet_transactions ALTER COLUMN status SET DEFAULT 'PENDING';")
     cursor.execute("ALTER TABLE inr_wallet_transactions ALTER COLUMN reversal_id SET DEFAULT '';")
     cursor.execute("ALTER TABLE inr_wallet_transactions ALTER COLUMN razorpay_order_id SET DEFAULT '';")
+    cursor.execute("ALTER TABLE inr_wallet_transactions ADD COLUMN IF NOT EXISTS mode VARCHAR(10) DEFAULT 'TEST';")
 
     # 🔹 live_trades
     cursor.execute("ALTER TABLE live_trades ALTER COLUMN status SET DEFAULT 'PENDING';")
@@ -287,6 +291,7 @@ def migrate_postgres_tables():
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN last_price SET DEFAULT 0;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN trade_time SET DEFAULT CURRENT_TIMESTAMP;")
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE BOOLEAN USING (autotrade_active::INTEGER <> 0);")
+    cursor.execute("ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS mode VARCHAR(10) DEFAULT 'TEST';")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN autotrade_active TYPE INTEGER USING autotrade_active::integer, ALTER COLUMN autotrade_active SET DEFAULT 0;")
     # cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE INT, ALTER COLUMN is_autotrade_marker SET DEFAULT 0, ALTER COLUMN is_autotrade_marker DROP NOT NULL;") 
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING (is_autotrade_marker::INTEGER <> 0);")
