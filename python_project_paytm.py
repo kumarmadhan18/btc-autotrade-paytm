@@ -1213,8 +1213,12 @@ def check_auto_trading(price_inr: float):
         st.session_state["autotrade_toggle"] = False
         update_autotrade_status_db(0)
 
-        btc_bal, _ = get_last_wallet_balance()
-        inr_bal, _ = get_last_inr_balance()
+        # use mode-aware balance fetch in exception
+        btc_bal, _ = get_last_wallet_balance(mode="LIVE" if REAL_TRADING else "TEST")
+        inr_bal, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+
+        # btc_bal, _ = get_last_wallet_balance()
+        # inr_bal, _ = get_last_inr_balance()
         log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
         log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
         update_wallet_daily_summary(auto_end=True)
