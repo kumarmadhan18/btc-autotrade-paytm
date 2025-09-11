@@ -1082,6 +1082,13 @@ def check_auto_trading(price_inr: float):
         st.session_state.BTC_WALLET = {"balance": btc_balance}
         st.session_state.INR_WALLET = {"balance": inr_balance}
 
+         # --- Active check ---
+        db_active = get_autotrade_active_from_db()
+        session_active = st.session_state.AUTO_TRADING.get("active", False)
+        autotrade_active = bool(db_active) or bool(session_active)
+        if not autotrade_active:
+            return
+
         # 🚨 Stop autotrade immediately if both wallets are empty
         # if btc_balance == 0 and inr_balance == 0:
         #     stop_autotrade("⏹️ Auto-Trade stopped: Both INR and BTC wallets are empty.")
@@ -1089,13 +1096,6 @@ def check_auto_trading(price_inr: float):
         
         if autotrade_active and btc_balance == 0 and inr_balance == 0:
             stop_autotrade("⏹️ Auto-Trade stopped: Both INR and BTC wallets are empty.")
-            return
-
-        # --- Active check ---
-        db_active = get_autotrade_active_from_db()
-        session_active = st.session_state.AUTO_TRADING.get("active", False)
-        autotrade_active = bool(db_active) or bool(session_active)
-        if not autotrade_active:
             return
 
         # --- Idle timeout check (30m) ---
