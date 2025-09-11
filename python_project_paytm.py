@@ -655,6 +655,35 @@ def get_autotrade_active_from_db() -> bool:
 def get_last_wallet_balance(mode: str):
     """
     Returns the last BTC balance and trade_time for the given mode.
+    Only considers real BTC trade events (BUY/SELL).
+    Always returns a tuple: (balance: float, trade_time: float or None)
+    """
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("""
+            SELECT balance_after, EXTRACT(EPOCH FROM trade_time) AS ts
+            FROM wallet_transactions
+            WHERE status = 'SUCCESS'
+              AND mode = %s
+              AND trade_type IN ('AUTO_BUY','AUTO_SELL','MANUAL_BUY','MANUAL_SELL')
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """, (mode,))
+        row = cursor.fetchone()
+        if row:
+            balance = float(row.get("balance_after") or 0.0)
+            ts = float(row.get("ts") or 0.0)
+            return balance, ts
+        else:
+            return 0.0, None
+    finally:
+        conn.close()
+
+
+def get_last_wallet_balance_old(mode: str):
+    """
+    Returns the last BTC balance and trade_time for the given mode.
     Always returns a tuple: (balance: float, trade_time: float or None)
     """
     conn = get_mysql_connection()
