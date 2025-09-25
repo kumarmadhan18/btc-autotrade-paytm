@@ -2392,7 +2392,7 @@ if REAL_TRADING:
         st.warning("⚠️ Your BTC balance is 0.0 — Withdrawal not allowed.")
 
     # --- Sync INR Balance---
-    st.subheader("🔄 Sync INR Balance"):
+    st.subheader("🔄 Sync INR Balance")
     balance = sync_inr_wallet("LIVE")
     if balance:
         st.success(f"✅ Synced: ₹{balance:.2f}")
