@@ -40,3 +40,5 @@ gunicorn
 # Needed for pkg_resources
 setuptools
 
+# TO Connect Paytm wallet to your bank account checksum library
+pycryptodome

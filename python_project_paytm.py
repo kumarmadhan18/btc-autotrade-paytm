@@ -26,9 +26,11 @@ import uuid
 import json
 import traceback
 import threading, time
+from Crypto.Cipher import AES
 from paytmchecksum import PaytmChecksum
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
+from webhook import generate_signature
 load_dotenv()
 # --- CONFIG ---
 # API_KEY = "NTaqcuC3m8Z38Rrr1k2dMQuid7ImrvOrw0p43cctvvBMMYQfrEehTifq7ZrBfvnk"
@@ -87,6 +89,61 @@ def cd_get_market_price(symbol: str = "BTCINR") -> float | None:
         return None
     except Exception as e:
         st.error(f"❌ Price fetch failed: {e}")
+        return None
+
+def get_paytm_wallet_balance():
+    url = "https://securegw.paytm.in/wallet-web/checkBalance"
+
+    payload = {
+        "mid": os.getenv("PAYTM_MID"),
+        "orderId": "BALCHECK_" + datetime.now().strftime("%Y%m%d%H%M%S")
+    }
+
+    # ✅ Generate checksum with merchant key
+    checksum = generate_signature(payload, os.getenv("PAYTM_MERCHANT_KEY"))
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-mid": os.getenv("PAYTM_MID"),
+        "x-checksum": checksum,
+    }
+
+    response = requests.post(url, json=payload, headers=headers, timeout=10)
+    data = response.json()
+
+    if data.get("status") == "SUCCESS":
+        return float(data["walletBalance"])
+    else:
+        raise Exception("Paytm API error: " + str(data))
+
+# ==============================
+# 🔹 DB Sync Logic
+# ==============================
+def sync_inr_wallet(mode="LIVE"):
+    """
+    Syncs INR wallet balance from Paytm API to database.
+    """
+    try:
+        live_balance = get_paytm_wallet_balance()
+
+        conn = get_mysql_connection()
+        cursor = conn.cursor()
+
+        # Insert sync transaction
+        cursor.execute("""
+            INSERT INTO inr_wallet_transactions
+            (trade_type, amount, balance_after, status, mode)
+            VALUES (%s, %s, %s, %s, %s)
+        """, ("SYNC", 0, live_balance, "SUCCESS", mode))
+
+        conn.commit()
+        conn.close()
+
+        print(f"✅ INR Wallet synced → Balance: ₹{live_balance:.2f}")
+        return live_balance
+
+    except Exception as e:
+        print("❌ Sync Error:", e)
         return None
     
 def init_mysql_tables():
@@ -308,6 +365,22 @@ def migrate_postgres_tables():
 # migrate_postgres_tables()
 
 def get_btc_price():
+    """
+    Return BTC price as float. Handles float or dict return from get_market_price.
+    """
+    try:
+        data = get_market_price("BTCUSDT")
+        if isinstance(data, dict):
+            return float(data.get("price") or data.get("last_price") or data.get("last"))
+        elif isinstance(data, (int, float, str)):
+            return float(data)
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Price fetch failed: {e}")
+        return None
+
+def get_btc_price_bak_25_09_2025():
     try:
         # data = client.get_symbol_ticker(symbol="BTCUSDT")
         data = get_market_price("BTCINR")
@@ -325,8 +398,34 @@ def usd_to_inr(usd):
 
 
 # --- Simulated/Real Wallet Balances ---
+def get_last_inr_balance(mode: str | None = None):
+    """
+    Returns (balance_after: float, ts: float|None) from inr_wallet_transactions.
+    Column is named trade_mode (not mode).
+    """
+    if mode is None:
+        mode = "LIVE" if REAL_TRADING else "TEST"
 
-def get_last_inr_balance(mode: str):
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("""
+            SELECT balance_after, EXTRACT(EPOCH FROM trade_time) AS ts
+            FROM inr_wallet_transactions
+            WHERE status = 'SUCCESS' AND trade_mode = %s
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """, (mode,))
+        row = cursor.fetchone()
+        if row:
+            return float(row.get("balance_after") or 0.0), float(row.get("ts") or 0.0)
+
+        # No INR tx found → default
+        return (10000.0, None) if not REAL_TRADING else (0.0, None)
+    finally:
+        conn.close()
+
+def get_last_inr_balance_bak_25_09_2025(mode: str):
     """
     Returns the last INR balance and trade_time for the given mode.
     Always returns a tuple: (balance: float, trade_time: float or None)
@@ -352,7 +451,11 @@ def get_last_inr_balance(mode: str):
         conn.close()
 
 # inr_balance, _ = get_last_inr_balance(mode)
-inr_balance, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+# inr_balance, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+if REAL_TRADING:
+    inr_balance, _ = sync_inr_wallet("LIVE")
+else:
+    inr_balance, _ = get_last_inr_balance(mode="TEST")
 
 # Enforce fallback at session initialization
 if not inr_balance or inr_balance <= 0:
@@ -652,7 +755,54 @@ def get_autotrade_active_from_db() -> bool:
     finally:
         conn.close()
 
-def get_last_wallet_balance(mode: str):
+def get_last_wallet_balance(mode: str | None = None):
+    """
+    Returns (balance_after: float, ts: float|None).
+    - mode optional: derived from REAL_TRADING if not provided
+    - Prefers real trade rows (BUY/SELL/MANUAL), skips autotrade marker rows
+    - Falls back to any last non-marker successful row
+    """
+    if mode is None:
+        mode = "LIVE" if REAL_TRADING else "TEST"
+
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # Prefer real trades
+        cursor.execute("""
+            SELECT balance_after, EXTRACT(EPOCH FROM trade_time) AS ts
+            FROM wallet_transactions
+            WHERE status = 'SUCCESS'
+              AND mode = %s
+              AND trade_type IN ('AUTO_BUY','AUTO_SELL','MANUAL_BUY','MANUAL_SELL')
+              AND COALESCE(is_autotrade_marker, FALSE) = FALSE
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """, (mode,))
+        row = cursor.fetchone()
+        if row:
+            return float(row.get("balance_after") or 0.0), float(row.get("ts") or 0.0)
+
+        # Fallback
+        cursor.execute("""
+            SELECT balance_after, EXTRACT(EPOCH FROM trade_time) AS ts
+            FROM wallet_transactions
+            WHERE status = 'SUCCESS'
+              AND mode = %s
+              AND COALESCE(is_autotrade_marker, FALSE) = FALSE
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """, (mode,))
+        row = cursor.fetchone()
+        if row:
+            return float(row.get("balance_after") or 0.0), float(row.get("ts") or 0.0)
+
+        return 0.0, None
+    finally:
+        conn.close()
+
+def get_last_wallet_balance_bak_25_09_2025(mode: str):
     """
     Returns the last BTC balance and trade_time for the given mode.
     Only considers real BTC trade events (BUY/SELL).
@@ -1021,8 +1171,57 @@ def get_last_auto_trade():
         return row if row else None
     finally:
         conn.close()
-    
+
 def start_autotrade():
+    """Safe start for auto-trading (does not reset balances)."""
+    try:
+        # --- Load balances from DB (mode-aware) ---
+        btc_balance, _ = get_last_wallet_balance(mode="LIVE" if REAL_TRADING else "TEST")
+        inr_balance, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+
+        if btc_balance is None:
+            btc_balance = 0.0
+        if inr_balance is None:
+            inr_balance = 0.0
+
+        # --- Save into session ---
+        st.session_state["BTC_WALLET"] = {"balance": float(btc_balance or 0.0)}
+        st.session_state["INR_WALLET"] = {"balance": float(inr_balance or 0.0)}
+
+        # --- Initialize AUTO_TRADING state ---
+        st.session_state.AUTO_TRADING = {
+            "active": True,
+            "entry_price": 0.0,
+            "last_price": 0.0,
+            "last_trade": None
+        }
+        st.session_state["autotrade_toggle"] = True
+        update_autotrade_status_db(1)
+
+        # --- Log marker in DB without affecting balances ---
+        log_wallet_transaction(
+            action="AUTO_START",
+            amount=0,
+            balance=st.session_state["BTC_WALLET"]["balance"],
+            price_inr=0,
+            trade_type="AUTO_TRADE_START"
+        )
+        log_inr_transaction(
+            action="AUTO_START",
+            amount=0,
+            balance=st.session_state["INR_WALLET"]["balance"],
+            mode="LIVE" if REAL_TRADING else "TEST"
+        )
+
+        # --- Notify ---
+        st.success(f"🚀 Auto-Trade ACTIVATED | INR ₹{inr_balance:,.2f} | ₿{btc_balance:.6f}")
+        send_telegram(f"🚀 Auto-Trade ACTIVATED | INR ₹{inr_balance:,.2f} | ₿{btc_balance:.6f}")
+
+    except Exception as e:
+        st.error(f"❌ Failed to start Auto-Trade: {e}")
+        send_telegram(f"❌ Failed to start Auto-Trade: {e}")
+    
+def start_autotrade_bak_25_09_2025():
     try:
         # ✅ Load balances from DB (mode-aware)
         btc_balance, _ = get_last_wallet_balance(mode="LIVE" if REAL_TRADING else "TEST")
@@ -1059,6 +1258,29 @@ def start_autotrade():
         stop_autotrade(f"❌ Failed to start Auto-Trade: {e}")
 
 def stop_autotrade(message: str):
+    """Centralized stop logic (prevents balance reset)."""
+    st.session_state.AUTO_TRADING["active"] = False
+    st.session_state["autotrade_toggle"] = False
+    update_autotrade_status_db(0)
+
+    try:
+        btc_bal, _ = get_last_wallet_balance(mode="LIVE" if REAL_TRADING else "TEST")
+        inr_bal, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+    except Exception:
+        btc_bal = st.session_state.get("BTC_WALLET", {}).get("balance", 0.0)
+        inr_bal = st.session_state.get("INR_WALLET", {}).get("balance", 0.0)
+
+    st.session_state.BTC_WALLET = {"balance": float(btc_bal or 0.0)}
+    st.session_state.INR_WALLET = {"balance": float(inr_bal or 0.0)}
+
+    log_wallet_transaction("AUTO_STOP", 0, st.session_state.BTC_WALLET["balance"], 0, "AUTO_TRADE_STOP")
+    log_inr_transaction("AUTO_STOP", 0, st.session_state.INR_WALLET["balance"], "LIVE" if REAL_TRADING else "TEST")
+    update_wallet_daily_summary(auto_end=True)
+
+    st.warning(message)
+    send_telegram(message)
+
+def stop_autotrade_bak_25_09_2025(message: str):
     """Centralized stop logic (prevents balance reset)."""
     st.session_state.AUTO_TRADING["active"] = False
     st.session_state["autotrade_toggle"] = False
@@ -1359,6 +1581,96 @@ def check_auto_sell(price):
         log_wallet_transaction("AUTO_SELL", BTC_WALLET['balance'], 0, price, trade_type="AUTO_SELL_STOP")
         BTC_WALLET['balance'] = 0
         update_wallet_daily_summary(start=False)
+
+import time
+import requests
+
+def withdraw_inr(amount: float, mode: str = "TEST", max_retries: int = 3, retry_delay: int = 60):
+    """
+    Handles INR withdrawal via Paytm Payout API with retry.
+    - On SUCCESS: balance reduced, transaction logged.
+    - On FAILURE: balance unchanged, transaction logged with status=FAILED.
+    - Retries up to max_retries if API/network error occurs.
+    """
+    conn = get_mysql_connection()
+    try:
+        cursor = conn.cursor()
+
+        # --- Get latest balance ---
+        cursor.execute("""
+            SELECT balance_after
+            FROM inr_wallet_transactions
+            WHERE mode = %s
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """, (mode,))
+        row = cursor.fetchone()
+        current_balance = float(row[0]) if row else 0.0
+
+        # --- Prevent overdraft ---
+        if amount > current_balance:
+            raise Exception("Insufficient balance")
+
+        payout_success = False
+        failure_reason = None
+
+        # --- Retry loop for LIVE mode ---
+        if mode == "LIVE":
+            for attempt in range(1, max_retries + 1):
+                try:
+                    res = requests.post("https://securegw.paytm.in/payout-api", json={
+                        "amount": amount,
+                        "mode": "BANK",
+                        "account": "xxxxxxx",
+                        "ifsc": "xxxxxxx"
+                    }, timeout=30)
+
+                    data = res.json()
+                    if data.get("status") == "SUCCESS":
+                        payout_success = True
+                        break  # exit retry loop
+                    else:
+                        failure_reason = data.get("statusMessage", "Unknown failure")
+                        msg = f"⚠️ Withdraw attempt {attempt} failed: {failure_reason}"
+                        st.warning(msg); send_telegram(msg)
+
+                except Exception as e:
+                    failure_reason = str(e)
+                    msg = f"⚠️ Withdraw attempt {attempt} error: {failure_reason}"
+                    st.warning(msg); send_telegram(msg)
+
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+
+        else:
+            # In TEST mode, always succeed
+            payout_success = True
+
+        # --- Update DB ---
+        if payout_success:
+            new_balance = current_balance - amount
+            cursor.execute("""
+                INSERT INTO inr_wallet_transactions
+                (trade_type, amount, balance_after, status, mode, reference)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, ("WITHDRAW", -amount, new_balance, "SUCCESS", mode, "PAYTM_PAYOUT"))
+            msg = f"✅ Withdraw successful: ₹{amount:.2f}, New Balance: ₹{new_balance:.2f}"
+            st.success(msg); send_telegram(msg)
+        else:
+            # Log failure attempt (balance unchanged)
+            cursor.execute("""
+                INSERT INTO inr_wallet_transactions
+                (trade_type, amount, balance_after, status, mode, reference)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, ("WITHDRAW", -amount, current_balance, "FAILED", mode, "PAYTM_PAYOUT_FAIL"))
+            msg = f"❌ Withdraw failed after {max_retries} attempts: ₹{amount:.2f}, Reason: {failure_reason}"
+            st.error(msg); send_telegram(msg)
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
 
 def deduct_balance(amount, method, recipient_name, acc_no=None, ifsc=None, upi=None):
     con = get_mysql_connection()
@@ -1912,6 +2224,27 @@ if st.button(f"{'🚀 Start' if not autotrade_active else '🛑 Stop'} Auto-Trad
     st.toast(msg)
     send_telegram(msg)
 
+# st.write("### ⚡ Auto-Trading")
+# if "autotrade_toggle" not in st.session_state:
+#     st.session_state["autotrade_toggle"] = False
+
+# autotrade_toggle = st.toggle(
+#     "Enable Auto-Trade",
+#     value=st.session_state["autotrade_toggle"],
+#     help="Turn ON/OFF auto trading"
+# )
+
+# # --- Handle toggle changes ---
+# if autotrade_toggle and not st.session_state["autotrade_toggle"]:
+#     # User switched ON
+#     start_autotrade()
+#     st.session_state["autotrade_toggle"] = True
+
+# elif not autotrade_toggle and st.session_state["autotrade_toggle"]:
+#     # User switched OFF
+#     stop_autotrade("🛑 Auto-Trade stopped manually.")
+#     st.session_state["autotrade_toggle"] = False
+
 
 # --- Auto Trade Button old on 29-08-2025---
 # if st.button(f"{'🚀 Start' if not st.session_state.autotrade_toggle else '🛑 Stop'} Auto-Trade"):
@@ -2057,6 +2390,25 @@ if REAL_TRADING:
                     st.error(f"❌ Withdrawal failed: {e}")
     else:
         st.warning("⚠️ Your BTC balance is 0.0 — Withdrawal not allowed.")
+
+    # --- Sync INR Balance---
+    st.subheader("🔄 Sync INR Balance"):
+    balance = sync_inr_wallet("LIVE")
+    if balance:
+        st.success(f"✅ Synced: ₹{balance:.2f}")
+
+# Show current INR balance
+# st.sidebar.metric("INR Balance", f"₹{st.session_state.INR_WALLET['balance']:.2f}")
+    
+    # Auto-refresh INR balance every 5 minutes
+    if "last_inr_sync" not in st.session_state:
+        st.session_state.last_inr_sync = 0
+
+    import time
+    if time.time() - st.session_state.last_inr_sync > 300:  # 300s = 5m
+        balance = sync_inr_wallet("LIVE")
+        if balance:
+            st.session_state.last_inr_sync = time.time()
 
 # --- Daily Summary ---
 st.subheader("📊 INR Wallet - Daily Summary")

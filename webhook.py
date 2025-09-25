@@ -7,6 +7,9 @@ import streamlit as st
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from Crypto.Cipher import AES
+
+IV = "@@@@&&&&####$$$$"
 
 app = Flask(__name__)
 
@@ -100,6 +103,65 @@ def paytm_webhook():
     conn.close()
 
     return jsonify({"status": txn_status})
+
+
+def generate_signature(params, merchant_key):
+    """
+    Generate checksum signature for Paytm request.
+    """
+    params_string = get_string_by_sorted_keys(params)
+    salt = generate_random_string(4)
+    final_string = params_string + "|" + salt
+    hasher = hashlib.sha256(final_string.encode())
+    hash_string = hasher.hexdigest() + salt
+
+    return encrypt(hash_string, merchant_key)
+
+def verify_signature(params, merchant_key, paytm_checksum):
+    """
+    Verify checksum signature returned by Paytm.
+    """
+    if "CHECKSUMHASH" in params:
+        params.pop("CHECKSUMHASH")
+
+    params_string = get_string_by_sorted_keys(params)
+    paytm_hash = decrypt(paytm_checksum, merchant_key)
+    salt = paytm_hash[-4:]
+    final_string = params_string + "|" + salt
+    hasher = hashlib.sha256(final_string.encode()).hexdigest()
+
+    return hasher + salt == paytm_hash
+
+def encrypt(input_string, key):
+    key = key.encode("utf-8")
+    iv = IV.encode("utf-8")
+    input_string = pad(input_string)
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    encrypted = cipher.encrypt(input_string.encode("utf-8"))
+    encrypted = base64.b64encode(encrypted).decode("utf-8")
+    return encrypted
+
+def decrypt(encrypted, key):
+    key = key.encode("utf-8")
+    iv = IV.encode("utf-8")
+    encrypted = base64.b64decode(encrypted)
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    decrypted = cipher.decrypt(encrypted).decode("utf-8")
+    return unpad(decrypted)
+
+def pad(data):
+    block_size = 16
+    padding = block_size - len(data) % block_size
+    return data + chr(padding) * padding
+
+def unpad(data):
+    return data[:-ord(data[-1])]
+
+def generate_random_string(length):
+    return "".join(random.choice(string.ascii_uppercase + string.digits + string.ascii_lowercase) for _ in range(length))
+
+def get_string_by_sorted_keys(params):
+    return "|".join([str(params[key]) for key in sorted(params.keys())])
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001)
