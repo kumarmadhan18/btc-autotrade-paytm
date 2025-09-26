@@ -494,11 +494,13 @@ def start_background_monitor():
                 if r.status_code == 200:
                     up_count += 1
                     if up_count == max_checks:
-                        send_telegram_alert("⚠️ Render usage reached 500 hours. Upgrade needed.")
-                else:
-                    raise Exception("App responded with error")
-            except:
-                send_telegram_alert("🚨 ALERT: Render app appears DOWN!")
+                        send_telegram("⚠️ Render usage reached 500 hours. Upgrade needed.")
+               else:
+                    raise Exception(f"App responded with status {r.status_code}")
+            # except:
+                # send_telegram("🚨 ALERT: Render app appears DOWN!")
+            except Exception as e:
+                send_telegram(f"🚨 ALERT: Render app appears DOWN! Error: {e}")
             time.sleep(CHECK_INTERVAL)
 
     t = threading.Thread(target=monitor, daemon=True)
