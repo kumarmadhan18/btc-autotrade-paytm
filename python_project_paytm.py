@@ -495,7 +495,7 @@ def start_background_monitor():
                     up_count += 1
                     if up_count == max_checks:
                         send_telegram("⚠️ Render usage reached 500 hours. Upgrade needed.")
-               else:
+                else:
                     raise Exception(f"App responded with status {r.status_code}")
             # except:
                 # send_telegram("🚨 ALERT: Render app appears DOWN!")
