@@ -2589,13 +2589,11 @@ st.subheader("📊 INR Wallet - Daily Summary")
 summary = get_daily_wallet_summary()
 if summary:
     df = pd.DataFrame(summary)
-    # df["net"] = df["deposits"] - df["withdrawals"]
     st.dataframe(df)
 else:
     st.info("No wallet transactions yet.")
 
-# # --- Hourly Candlestick Chart ---
-
+# --- BTC/INR Candlestick Chart ---
 st.write("### 📊 Live BTC/INR Chart")
 
 # --- Date range input ---
@@ -2607,7 +2605,7 @@ with date_col2:
 
 # --- Fetch logged data from wallet_history (PostgreSQL) ---
 def get_wallet_history(start_date, end_date, mode="LIVE"):
-    conn = get_mysql_connection()   # ✅ use your psycopg2 connection helper
+    conn = get_pg_connection()   # ✅ psycopg2 connection helper
     try:
         query = """
             SELECT trade_date, auto_start_price, auto_end_price, current_inr_value
@@ -2619,8 +2617,16 @@ def get_wallet_history(start_date, end_date, mode="LIVE"):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(query, (start_date, end_date, mode))
             rows = cursor.fetchall()
-            df = pd.DataFrame(rows, columns=["timestamp", "start_price", "end_price", "current_price"])
-        return df
+            if not rows:
+                return pd.DataFrame()
+            df = pd.DataFrame(rows)
+            df.rename(columns={
+                "trade_date": "timestamp",
+                "auto_start_price": "start_price",
+                "auto_end_price": "end_price",
+                "current_inr_value": "current_price"
+            }, inplace=True)
+            return df
     finally:
         conn.close()
 
@@ -2631,7 +2637,7 @@ if not hist_df.empty:
     # Convert timestamp → datetime
     hist_df["timestamp"] = pd.to_datetime(hist_df["timestamp"])
 
-    # Use auto_start_price / auto_end_price, fallback to current_inr_value
+    # Construct OHLC from available columns
     hist_df["open"] = hist_df["start_price"].fillna(hist_df["current_price"])
     hist_df["close"] = hist_df["end_price"].fillna(hist_df["current_price"])
     hist_df["high"] = hist_df[["start_price", "end_price", "current_price"]].max(axis=1)
@@ -2687,6 +2693,7 @@ if not hist_df.empty:
 
 else:
     st.warning("⚠️ No wallet history found. Please wait for logger to collect data.")
+
 # st.write("### 📊 Live BTC Chart")
 
 # @st.cache_data(ttl=300)
