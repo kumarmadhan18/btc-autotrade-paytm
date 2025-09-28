@@ -1420,17 +1420,11 @@ def check_auto_trading(price_inr: float):
 
         # === AUTO-SELL CONDITIONS ===
         roi = ((price_inr - entry_price) / entry_price) * 100 if entry_price > 0 else None
+        cond1 = (roi is not None and roi >= min_roi and price_diff >= threshold)  # ✅ ROI SELL
+        cond2 = (inr_balance <= 0 and btc_balance > 0)                            # ✅ FORCE SELL
+        cond3 = (entry_price == 0 and btc_balance > 0)                            # ✅ Fallback SELL
 
-        # ✅ SELL only when ROI ≥ 1%
-        cond1 = (roi is not None and roi >= min_roi and price_diff >= threshold)
-
-        # ✅ Allow sell if INR empty and ROI positive
-        cond2 = (inr_balance <= 0 and btc_balance > 0 and roi is not None and roi > 0)
-
-        # ✅ Fallback recovery if entry_price missing but BTC exists
-        cond3 = (entry_price == 0 and btc_balance > 0)
-
-        if btc_balance >= 0.0001 and last_trade_state == "BUY" and (cond1 or cond2 or cond3):
+        if btc_balance >= 0.0001 and (last_trade_state == "BUY") and (cond1 or cond2 or cond3):
             sell_btc = btc_balance
             inr_received = sell_btc * price_inr
 
@@ -1441,11 +1435,15 @@ def check_auto_trading(price_inr: float):
             st.session_state.AUTO_TRADING["last_trade"] = "SELL"
             update_last_auto_trade_price_db(price_inr)
 
+            # ✅ Safe ROI formatting
             roi_text = f"{roi:.4f}%" if roi is not None else "N/A"
+
             msg = f"🔴 Auto-SELL {sell_btc:.6f} BTC → ₹{inr_received:.2f} @ ₹{price_inr:.2f} | ROI {roi_text}"
             st.warning(msg); st.toast(msg); send_telegram(msg)
+
             log_wallet_transaction("AUTO_SELL", sell_btc, 0, price_inr, "AUTO_SELL")
-            log_inr_transaction("AUTO_SELL", inr_received, st.session_state.INR_WALLET["balance"], "LIVE" if REAL_TRADING else "TEST")
+            log_inr_transaction("AUTO_SELL", inr_received, st.session_state.INR_WALLET["balance"],
+                                "LIVE" if REAL_TRADING else "TEST")
             save_trade_log("AUTO_SELL", sell_btc, 0, price_inr, roi if roi else 0.0)
             return
 
@@ -2596,50 +2594,109 @@ if summary:
 else:
     st.info("No wallet transactions yet.")
 
-# --- Hourly Candlestick Chart ---
+# # --- Hourly Candlestick Chart ---
+
+st.write("### 📊 Live BTC/INR Chart")
+
+# --- Date range input ---
+date_col1, date_col2 = st.columns(2)
+with date_col1:
+    start_date = st.date_input("From", value=datetime.today() - timedelta(days=3))
+with date_col2:
+    end_date = st.date_input("To", value=datetime.today())
+
+# --- Fetch logged data from wallet_history (PostgreSQL) ---
+def get_wallet_history(start_date, end_date, mode="LIVE"):
+    conn = get_mysql_connection()   # ✅ use your psycopg2 connection helper
+    try:
+        query = """
+            SELECT trade_date, auto_start_price, auto_end_price, current_inr_value
+            FROM wallet_history
+            WHERE trade_date BETWEEN %s AND %s
+              AND mode = %s
+            ORDER BY trade_date ASC
+        """
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(query, (start_date, end_date, mode))
+            rows = cursor.fetchall()
+            df = pd.DataFrame(rows, columns=["timestamp", "start_price", "end_price", "current_price"])
+        return df
+    finally:
+        conn.close()
+
+# --- Load data ---
+hist_df = get_wallet_history(start_date, end_date, mode="LIVE" if REAL_TRADING else "TEST")
+
+if not hist_df.empty:
+    # Convert timestamp → datetime
+    hist_df["timestamp"] = pd.to_datetime(hist_df["timestamp"])
+
+    # Use auto_start_price / auto_end_price, fallback to current_inr_value
+    hist_df["open"] = hist_df["start_price"].fillna(hist_df["current_price"])
+    hist_df["close"] = hist_df["end_price"].fillna(hist_df["current_price"])
+    hist_df["high"] = hist_df[["start_price", "end_price", "current_price"]].max(axis=1)
+    hist_df["low"] = hist_df[["start_price", "end_price", "current_price"]].min(axis=1)
+
+    # Resample to hourly OHLC
+    ohlc_df = hist_df.resample("1H", on="timestamp").agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last")
+    ).dropna().reset_index()
+
+    if ohlc_df.empty:
+        st.info("⚠️ No aggregated data found for this period. Showing last 24h.")
+        hist_tail = hist_df.tail(24).copy()
+        ohlc_df = pd.DataFrame({
+            "timestamp": hist_tail["timestamp"],
+            "open": hist_tail["open"],
+            "high": hist_tail["high"],
+            "low": hist_tail["low"],
+            "close": hist_tail["close"]
+        })
+
+    # --- Plot candlestick ---
+    fig = go.Figure(go.Candlestick(
+        x=ohlc_df['timestamp'],
+        open=ohlc_df['open'],
+        high=ohlc_df['high'],
+        low=ohlc_df['low'],
+        close=ohlc_df['close'],
+        increasing_line_color='green',
+        decreasing_line_color='red'
+    ))
+
+    fig.update_layout(
+        xaxis_rangeslider_visible=True,
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=400,
+        xaxis=dict(
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=12, label="12h", step="hour", stepmode="backward"),
+                    dict(count=1, label="24h", step="day", stepmode="backward"),
+                    dict(count=3, label="3d", step="day", stepmode="backward"),
+                    dict(step="all")
+                ])
+            )
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+else:
+    st.warning("⚠️ No wallet history found. Please wait for logger to collect data.")
 # st.write("### 📊 Live BTC Chart")
 
 # @st.cache_data(ttl=300)
-
-# def get_historical_klines(market="BTCINR", interval="1h", limit=168):
-#     """
-#     Fetch historical OHLCV data from CoinDCX
-#     interval: "1m", "5m", "15m", "1h", "1d"
-#     limit: number of candles
-#     """
-#     url = f"{BASE_URL}/exchange/v1/market_data/ohlc"
-#     payload = {
-#         "pair": market,
-#         "interval": interval,
-#         "limit": limit
-#     }
-#     try:
-#         res = requests.post(url, json=payload)
-#         data = res.json()
-#         # Format into list of [time, open, high, low, close, volume]
-#         ohlcv = []
-#         for item in data[market]:
-#             ohlcv.append([
-#                 datetime.fromtimestamp(item["time"]/1000),  # convert ms → datetime
-#                 float(item["open"]),
-#                 float(item["high"]),
-#                 float(item["low"]),
-#                 float(item["close"]),
-#                 float(item["volume"])
-#             ])
-#         return ohlcv
-#     except Exception as e:
-#         print("Error fetching OHLCV:", e)
-#         return []
-
 # def get_hourly_klines():
 #     try:
-#         # data = client.get_historical_klines(
-#         #     "BTCUSDT",
-#         #     Client.KLINE_INTERVAL_1HOUR,
-#         #     "7 day ago UTC"
-#         # )
-#         data = get_historical_klines("BTCINR", interval="1h", limit=168)  # last 7 days
+#         data = client.get_historical_klines(
+#             "BTCUSDT",
+#             Client.KLINE_INTERVAL_1HOUR,
+#             "7 day ago UTC"
+#         )
 #         df = pd.DataFrame(data, columns=[
 #             "timestamp", "open", "high", "low", "close", "volume",
 #             "close_time", "quote_asset_volume", "number_of_trades",
@@ -2697,162 +2754,6 @@ else:
 #     )
     
 #     st.plotly_chart(fig, use_container_width=True)
-
-st.write("### 📊 Live BTC Chart")
-
-@st.cache_data(ttl=300)
-def get_historical_klines(market="BTCINR", interval="1h", limit=168):
-    """
-    Fetch historical OHLCV data from CoinDCX
-    interval: "1m", "5m", "15m", "1h", "1d"
-    limit: number of candles
-    """
-    url = f"{BASE_URL}/exchange/v1/market_data/ohlc"
-    payload = {
-        "pair": market.upper(),
-        "interval": interval,
-        "limit": limit
-    }
-    try:
-        res = requests.post(url, json=payload)
-        data = res.json()
-
-        if market.upper() not in data:
-            return None   # ❌ not found → caller decides fallback
-
-        ohlcv = []
-        for item in data[market.upper()]:
-            ohlcv.append([
-                datetime.fromtimestamp(item["time"] / 1000),  # ms → datetime
-                float(item["open"]),
-                float(item["high"]),
-                float(item["low"]),
-                float(item["close"]),
-                float(item["volume"])
-            ])
-        return ohlcv
-    except Exception as e:
-        st.error(f"Error fetching OHLCV: {e}")
-        return None
-
-
-def get_hourly_klines():
-    try:
-        # ✅ Try BTCINR first
-        data = get_historical_klines("BTCINR", interval="1h", limit=168)
-
-        # ✅ If not available, fallback to BTCUSDT
-        if not data:
-            st.warning("BTCINR not available, falling back to BTCUSDT")
-            data = get_historical_klines("BTCUSDT", interval="1h", limit=168)
-
-        if not data:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(data, columns=[
-            "timestamp", "open", "high", "low", "close", "volume"
-        ])
-        df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
-        return df
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return pd.DataFrame()
-
-
-# @st.cache_data(ttl=300)
-# def get_historical_klines(market="BTCINR", interval="1h", limit=168):
-#     """
-#     Fetch historical OHLCV data from CoinDCX
-#     interval: "1m", "5m", "15m", "1h", "1d"
-#     limit: number of candles
-#     """
-#     url = f"{BASE_URL}/exchange/v1/market_data/ohlc"
-#     payload = {
-#         "pair": market,
-#         "interval": interval,
-#         "limit": limit
-#     }
-#     try:
-#         res = requests.post(url, json=payload)
-#         data = res.json()
-#         ohlcv = []
-#         for item in data[market]:
-#             ohlcv.append([
-#                 datetime.fromtimestamp(item["time"] / 1000),  # ms → datetime
-#                 float(item["open"]),
-#                 float(item["high"]),
-#                 float(item["low"]),
-#                 float(item["close"]),
-#                 float(item["volume"])
-#             ])
-#         return ohlcv
-#     except Exception as e:
-#         st.error(f"Error fetching OHLCV: {e}")
-#         return []
-
-# def get_hourly_klines():
-#     try:
-#         data = get_historical_klines("BTCINR", interval="1h", limit=168)  # last 7 days
-#         if not data:
-#             return pd.DataFrame()
-
-#         df = pd.DataFrame(data, columns=[
-#             "timestamp", "open", "high", "low", "close", "volume"
-#         ])
-#         # Already converted to datetime above, no unit="ms" needed
-#         df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
-#         return df
-#     except Exception as e:
-#         st.error(f"Error fetching data: {e}")
-#         return pd.DataFrame()
-
-# Date selection
-st.write("Select Date Range:")
-date_col1, date_col2 = st.columns(2)
-with date_col1:
-    start_date = st.date_input("From", value=datetime.today() - timedelta(days=3))
-with date_col2:
-    end_date = st.date_input("To", value=datetime.today())
-
-hist_df = get_hourly_klines()
-if not hist_df.empty:
-    filtered_df = hist_df[
-        (hist_df['timestamp'].dt.date >= start_date) &
-        (hist_df['timestamp'].dt.date <= end_date)
-    ]
-    
-    if filtered_df.empty:
-        filtered_df = hist_df.tail(24)  # fallback to last 24h
-    
-    fig = go.Figure(go.Candlestick(
-        x=filtered_df['timestamp'],
-        open=filtered_df['open'],
-        high=filtered_df['high'],
-        low=filtered_df['low'],
-        close=filtered_df['close'],
-        increasing_line_color='green',
-        decreasing_line_color='red'
-    ))
-    
-    fig.update_layout(
-        xaxis_rangeslider_visible=True,
-        margin=dict(l=20, r=20, t=20, b=20),
-        height=400,
-        xaxis=dict(
-            rangeselector=dict(
-                buttons=list([
-                    dict(count=12, label="12h", step="hour", stepmode="backward"),
-                    dict(count=1, label="24h", step="day", stepmode="backward"),
-                    dict(count=3, label="3d", step="day", stepmode="backward"),
-                    dict(step="all")
-                ])
-            )
-        )
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.warning("No data available for chart.")
 
 # --- rerun for auto-refresh ---
 time.sleep(10)
