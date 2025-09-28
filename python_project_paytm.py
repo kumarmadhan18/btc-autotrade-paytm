@@ -1308,6 +1308,181 @@ def check_auto_trading(price_inr: float):
     Full Auto-Trading Logic:
     - Strict BUY→SELL sequence (no duplicate/cumulative trades).
     - Auto-BUY if INR>0 and last trade was SELL/None.
+    - Auto-SELL with multiple conditions (ROI, force, fallback).
+    - Force-SELL if INR wallet is empty but BTC>0.
+    - Idle timeout (30m), trade cooldown (60s).
+    - Wallet balances synced with DB before/after trade.
+    - Auto-stop + notifications on error or idle.
+    """
+    try:
+        # --- Ensure AUTO_TRADING state in session ---
+        if "AUTO_TRADING" not in st.session_state:
+            st.session_state.AUTO_TRADING = {
+                "active": True,
+                "entry_price": 0,
+                "last_price": 0,
+                "last_trade": None
+            }
+
+        # --- Always refresh balances from DB (mode-aware) ---
+        btc_balance, _ = get_last_wallet_balance(mode="LIVE" if REAL_TRADING else "TEST")
+        inr_balance, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+
+        btc_balance = float(btc_balance or 0.0)
+        inr_balance = float(inr_balance or 0.0)
+
+        st.session_state.BTC_WALLET = {"balance": btc_balance}
+        st.session_state.INR_WALLET = {"balance": inr_balance}
+
+         # --- Active check ---
+        db_active = get_autotrade_active_from_db()
+        session_active = st.session_state.AUTO_TRADING.get("active", False)
+        autotrade_active = bool(db_active) or bool(session_active)
+        if not autotrade_active:
+            return
+
+        # 🚨 Stop autotrade immediately if both wallets are empty
+        # if btc_balance == 0 and inr_balance == 0:
+        #     stop_autotrade("⏹️ Auto-Trade stopped: Both INR and BTC wallets are empty.")
+        #     return
+        
+        if autotrade_active and btc_balance == 0 and inr_balance == 0:
+            stop_autotrade("⏹️ Auto-Trade stopped: Both INR and BTC wallets are empty.")
+            return
+
+        # --- Idle timeout check (30m) ---
+        idle_timeout = 1800
+        last_trade_time = get_last_trade_time_from_db()
+        if last_trade_time:
+            if isinstance(last_trade_time, (int, float)):
+                last_trade_time = datetime.fromtimestamp(last_trade_time)
+            elif isinstance(last_trade_time, str):
+                try:
+                    last_trade_time = datetime.fromisoformat(last_trade_time)
+                except ValueError:
+                    last_trade_time = None
+
+        if last_trade_time and isinstance(last_trade_time, datetime):
+            if (datetime.now() - last_trade_time).total_seconds() > idle_timeout:
+                stop_autotrade("⏳ Auto-Trade stopped (idle timeout: 30m no trades).")
+                return
+
+        # --- Trade cooldown check (60s) ---
+        last_trade = get_last_auto_trade()
+        last_type = last_trade.get("trade_type") if last_trade else None
+        last_ts = 0
+        if last_trade and last_trade.get("trade_time"):
+            trade_time_val = last_trade["trade_time"]
+            if isinstance(trade_time_val, datetime):
+                last_ts = int(trade_time_val.timestamp())
+            elif isinstance(trade_time_val, (int, float)):
+                last_ts = int(trade_time_val)
+            elif isinstance(trade_time_val, str):
+                try:
+                    last_ts = int(datetime.fromisoformat(trade_time_val).timestamp())
+                except ValueError:
+                    last_ts = 0
+
+        now_ts = int(time.time())
+        if last_type in ("AUTO_BUY", "AUTO_SELL") and (now_ts - last_ts < 60):
+            return  # prevent duplicate fast trades
+
+        # --- Restore last_trade state ---
+        if st.session_state.AUTO_TRADING.get("last_trade") is None:
+            if last_type == "AUTO_BUY":
+                st.session_state.AUTO_TRADING["last_trade"] = "BUY"
+            elif last_type == "AUTO_SELL":
+                st.session_state.AUTO_TRADING["last_trade"] = "SELL"
+
+        last_trade_state = st.session_state.AUTO_TRADING.get("last_trade")
+
+        # --- Strategy params ---
+        min_roi = 0.01   # 1%
+        threshold = 5    # INR
+        entry_price = float(st.session_state.AUTO_TRADING.get("entry_price", 0) or 0.0)
+        last_price = float(st.session_state.AUTO_TRADING.get("last_price", 0) or 0.0)
+        price_diff = price_inr - last_price if last_price else 0
+
+        # === AUTO-BUY ===
+        if inr_balance >= 20 and (last_trade_state is None or last_trade_state == "SELL"):
+            buy_inr = inr_balance * 0.5
+            btc_bought = buy_inr / price_inr
+
+            st.session_state.BTC_WALLET["balance"] = btc_balance + btc_bought
+            st.session_state.INR_WALLET["balance"] = inr_balance - buy_inr
+            st.session_state.AUTO_TRADING["entry_price"] = price_inr
+            st.session_state.AUTO_TRADING["last_price"] = price_inr
+            st.session_state.AUTO_TRADING["last_trade"] = "BUY"
+            update_last_auto_trade_price_db(price_inr)
+
+            msg = f"🟢 Auto-BUY ₹{buy_inr:.2f} → {btc_bought:.6f} BTC @ ₹{price_inr:.2f}"
+            st.success(msg); st.toast(msg); send_telegram(msg)
+            log_wallet_transaction("AUTO_BUY", btc_bought, st.session_state.BTC_WALLET["balance"], price_inr, "AUTO_BUY")
+            log_inr_transaction("AUTO_BUY", -buy_inr, st.session_state.INR_WALLET["balance"], "LIVE" if REAL_TRADING else "TEST")
+            save_trade_log("AUTO_BUY", btc_bought, st.session_state.BTC_WALLET["balance"], price_inr)
+            return
+
+        # === AUTO-SELL CONDITIONS ===
+        roi = ((price_inr - entry_price) / entry_price) * 100 if entry_price > 0 else None
+        cond1 = (roi is not None and roi >= min_roi and price_diff >= threshold)
+        cond2 = (inr_balance <= 0 and btc_balance > 0)
+        cond3 = (entry_price == 0 and btc_balance > 0)
+
+        if btc_balance >= 0.0001 and (last_trade_state == "BUY") and (cond1 or cond2 or cond3):
+            sell_btc = btc_balance
+            inr_received = sell_btc * price_inr
+
+            st.session_state.BTC_WALLET["balance"] = 0.0
+            st.session_state.INR_WALLET["balance"] = inr_balance + inr_received
+            st.session_state.AUTO_TRADING["entry_price"] = 0
+            st.session_state.AUTO_TRADING["last_price"] = price_inr
+            st.session_state.AUTO_TRADING["last_trade"] = "SELL"
+            update_last_auto_trade_price_db(price_inr)
+
+            roi_text = f"{roi:.4f}%" if roi is not None else "N/A"
+            msg = f"🔴 Auto-SELL {sell_btc:.6f} BTC → ₹{inr_received:.2f} @ ₹{price_inr:.2f} | ROI {roi_text}"
+            st.warning(msg); st.toast(msg); send_telegram(msg)
+            log_wallet_transaction("AUTO_SELL", sell_btc, 0, price_inr, "AUTO_SELL")
+            log_inr_transaction("AUTO_SELL", inr_received, st.session_state.INR_WALLET["balance"], "LIVE" if REAL_TRADING else "TEST")
+            save_trade_log("AUTO_SELL", sell_btc, 0, price_inr, roi if roi else 0.0)
+            return
+
+        # ⚠️ Debugging skipped sells
+        if btc_balance > 0 and (last_trade_state == "BUY") and not (cond1 or cond2 or cond3):
+            reasons = []
+            if not cond1: reasons.append("ROI not met")
+            if not cond2: reasons.append("INR not empty")
+            if not cond3: reasons.append("entry_price set")
+            st.info(f"💡 Sell skipped: {', '.join(reasons)} | BTC={btc_balance:.6f}, INR={inr_balance:.2f}")
+
+        # Fallback to set last_price if missing
+        if last_price == 0:
+            st.session_state.AUTO_TRADING["last_price"] = price_inr
+            update_last_auto_trade_price_db(price_inr)
+
+    except Exception as e:
+        st.session_state.AUTO_TRADING["active"] = False
+        st.session_state["autotrade_toggle"] = False
+        update_autotrade_status_db(0)
+
+        # use mode-aware balance fetch in exception
+        btc_bal, _ = get_last_wallet_balance(mode="LIVE" if REAL_TRADING else "TEST")
+        inr_bal, _ = get_last_inr_balance(mode="LIVE" if REAL_TRADING else "TEST")
+
+        # btc_bal, _ = get_last_wallet_balance()
+        # inr_bal, _ = get_last_inr_balance()
+        log_wallet_transaction("AUTO_STOP", 0, btc_bal, 0, "AUTO_TRADE_STOP")
+        log_inr_transaction("AUTO_STOP", 0, inr_bal, "LIVE" if REAL_TRADING else "TEST")
+        update_wallet_daily_summary(auto_end=True)
+
+        error_msg = f"❌ Auto-Trade stopped (technical error): {str(e)}"
+        st.error(error_msg); send_telegram(error_msg)
+
+def check_auto_trading_on_28_09_2025(price_inr: float):
+    """
+    Full Auto-Trading Logic:
+    - Strict BUY→SELL sequence (no duplicate/cumulative trades).
+    - Auto-BUY if INR>0 and last trade was SELL/None.
     - Auto-SELL only if ROI ≥ 1% (safe profit) OR INR empty with positive ROI.
     - Force-SELL if INR wallet is empty but BTC>0 and ROI positive.
     - Idle timeout (30m), trade cooldown (60s).
@@ -2605,7 +2780,7 @@ with date_col2:
 
 # --- Fetch logged data from wallet_history (PostgreSQL) ---
 def get_wallet_history(start_date, end_date, mode="LIVE"):
-    conn = get_pg_connection()   # ✅ psycopg2 connection helper
+    conn = get_mysql_connection()   # ✅ psycopg2 connection helper
     try:
         query = """
             SELECT trade_date, auto_start_price, auto_end_price, current_inr_value
