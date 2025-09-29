@@ -297,7 +297,7 @@ def init_mysql_tables():
     conn.close()
     st.success("✅ PostgreSQL tables initialized successfully!")
     
-init_mysql_tables()
+# init_mysql_tables()
 
 def migrate_postgres_tables():
     conn = get_mysql_connection()
@@ -352,10 +352,10 @@ def migrate_postgres_tables():
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING (is_autotrade_marker::INTEGER <> 0);")
 
 #------ Temprary Cleaning purpose ------##
-    # cursor.execute("TRUNCATE wallet_history;")
-    # cursor.execute("TRUNCATE wallet_transactions;")
-    # cursor.execute("TRUNCATE inr_wallet_transactions;")
-    # cursor.execute("TRUNCATE user_wallets;")
+    cursor.execute("TRUNCATE wallet_history;")
+    cursor.execute("TRUNCATE wallet_transactions;")
+    cursor.execute("TRUNCATE inr_wallet_transactions;")
+    cursor.execute("TRUNCATE user_wallets;")
 
     conn.commit()
     cursor.close()
@@ -2759,6 +2759,116 @@ if REAL_TRADING:
         if balance:
             st.session_state.last_inr_sync = time.time()
 
+# # --- Daily Summary ---
+# st.subheader("📊 INR Wallet - Daily Summary")
+# summary = get_daily_wallet_summary()
+# if summary:
+#     df = pd.DataFrame(summary)
+#     st.dataframe(df)
+# else:
+#     st.info("No wallet transactions yet.")
+
+# # --- BTC/INR Candlestick Chart ---
+# st.write("### 📊 Live BTC/INR Chart")
+
+# # --- Date range input ---
+# date_col1, date_col2 = st.columns(2)
+# with date_col1:
+#     start_date = st.date_input("From", value=datetime.today() - timedelta(days=3))
+# with date_col2:
+#     end_date = st.date_input("To", value=datetime.today())
+
+# # --- Fetch logged data from wallet_history (PostgreSQL) ---
+# def get_wallet_history(start_date, end_date, mode="LIVE"):
+#     conn = get_mysql_connection()   # ✅ psycopg2 connection helper
+#     try:
+#         query = """
+#             SELECT trade_date, auto_start_price, auto_end_price, current_inr_value
+#             FROM wallet_history
+#             WHERE trade_date BETWEEN %s AND %s
+#               AND mode = %s
+#             ORDER BY trade_date ASC
+#         """
+#         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+#             cursor.execute(query, (start_date, end_date, mode))
+#             rows = cursor.fetchall()
+#             if not rows:
+#                 return pd.DataFrame()
+#             df = pd.DataFrame(rows)
+#             df.rename(columns={
+#                 "trade_date": "timestamp",
+#                 "auto_start_price": "start_price",
+#                 "auto_end_price": "end_price",
+#                 "current_inr_value": "current_price"
+#             }, inplace=True)
+#             return df
+#     finally:
+#         conn.close()
+
+# # --- Load data ---
+# hist_df = get_wallet_history(start_date, end_date, mode="LIVE" if REAL_TRADING else "TEST")
+
+# if not hist_df.empty:
+#     # Convert timestamp → datetime
+#     hist_df["timestamp"] = pd.to_datetime(hist_df["timestamp"])
+
+#     # Construct OHLC from available columns
+#     hist_df["open"] = hist_df["start_price"].fillna(hist_df["current_price"])
+#     hist_df["close"] = hist_df["end_price"].fillna(hist_df["current_price"])
+#     hist_df["high"] = hist_df[["start_price", "end_price", "current_price"]].max(axis=1)
+#     hist_df["low"] = hist_df[["start_price", "end_price", "current_price"]].min(axis=1)
+
+#     # Resample to hourly OHLC
+#     ohlc_df = hist_df.resample("1H", on="timestamp").agg(
+#         open=("open", "first"),
+#         high=("high", "max"),
+#         low=("low", "min"),
+#         close=("close", "last")
+#     ).dropna().reset_index()
+
+#     if ohlc_df.empty:
+#         st.info("⚠️ No aggregated data found for this period. Showing last 24h.")
+#         hist_tail = hist_df.tail(24).copy()
+#         ohlc_df = pd.DataFrame({
+#             "timestamp": hist_tail["timestamp"],
+#             "open": hist_tail["open"],
+#             "high": hist_tail["high"],
+#             "low": hist_tail["low"],
+#             "close": hist_tail["close"]
+#         })
+
+#     # --- Plot candlestick ---
+#     fig = go.Figure(go.Candlestick(
+#         x=ohlc_df['timestamp'],
+#         open=ohlc_df['open'],
+#         high=ohlc_df['high'],
+#         low=ohlc_df['low'],
+#         close=ohlc_df['close'],
+#         increasing_line_color='green',
+#         decreasing_line_color='red'
+#     ))
+
+#     fig.update_layout(
+#         xaxis_rangeslider_visible=True,
+#         margin=dict(l=20, r=20, t=20, b=20),
+#         height=400,
+#         xaxis=dict(
+#             rangeselector=dict(
+#                 buttons=list([
+#                     dict(count=12, label="12h", step="hour", stepmode="backward"),
+#                     dict(count=1, label="24h", step="day", stepmode="backward"),
+#                     dict(count=3, label="3d", step="day", stepmode="backward"),
+#                     dict(step="all")
+#                 ])
+#             )
+#         )
+#     )
+
+#     st.plotly_chart(fig, use_container_width=True)
+
+# else:
+#     st.warning("⚠️ No wallet history found. Please wait for logger to collect data.")
+
 # --- Daily Summary ---
 st.subheader("📊 INR Wallet - Daily Summary")
 summary = get_daily_wallet_summary()
@@ -2772,11 +2882,15 @@ else:
 st.write("### 📊 Live BTC/INR Chart")
 
 # --- Date range input ---
+st.write("Select Date Range:")
 date_col1, date_col2 = st.columns(2)
 with date_col1:
     start_date = st.date_input("From", value=datetime.today() - timedelta(days=3))
 with date_col2:
     end_date = st.date_input("To", value=datetime.today())
+
+# --- Candle type switch ---
+candle_type = st.radio("Candle Type", ["Hourly", "Daily"], horizontal=True)
 
 # --- Fetch logged data from wallet_history (PostgreSQL) ---
 def get_wallet_history(start_date, end_date, mode="LIVE"):
@@ -2810,7 +2924,8 @@ hist_df = get_wallet_history(start_date, end_date, mode="LIVE" if REAL_TRADING e
 
 if not hist_df.empty:
     # Convert timestamp → datetime
-    hist_df["timestamp"] = pd.to_datetime(hist_df["timestamp"])
+    hist_df["timestamp"] = pd.to_datetime(hist_df["timestamp"], errors="coerce")
+    hist_df.dropna(subset=["timestamp"], inplace=True)
 
     # Construct OHLC from available columns
     hist_df["open"] = hist_df["start_price"].fillna(hist_df["current_price"])
@@ -2818,16 +2933,34 @@ if not hist_df.empty:
     hist_df["high"] = hist_df[["start_price", "end_price", "current_price"]].max(axis=1)
     hist_df["low"] = hist_df[["start_price", "end_price", "current_price"]].min(axis=1)
 
-    # Resample to hourly OHLC
-    ohlc_df = hist_df.resample("1H", on="timestamp").agg(
-        open=("open", "first"),
-        high=("high", "max"),
-        low=("low", "min"),
-        close=("close", "last")
-    ).dropna().reset_index()
+    # --- Filter by selected date range ---
+    filtered_df = hist_df[
+        (hist_df["timestamp"].dt.date >= start_date) &
+        (hist_df["timestamp"].dt.date <= end_date)
+    ]
 
+    # --- Resample based on candle type ---
+    if not filtered_df.empty:
+        if candle_type == "Hourly":
+            ohlc_df = filtered_df.resample("1H", on="timestamp").agg(
+                open=("open", "first"),
+                high=("high", "max"),
+                low=("low", "min"),
+                close=("close", "last")
+            ).dropna().reset_index()
+        else:  # Daily
+            ohlc_df = filtered_df.resample("1D", on="timestamp").agg(
+                open=("open", "first"),
+                high=("high", "max"),
+                low=("low", "min"),
+                close=("close", "last")
+            ).dropna().reset_index()
+    else:
+        ohlc_df = pd.DataFrame()
+
+    # --- Fallback if no candles ---
     if ohlc_df.empty:
-        st.info("⚠️ No aggregated data found for this period. Showing last 24h.")
+        st.info("⚠️ No aggregated data found for this period. Showing last 24 records.")
         hist_tail = hist_df.tail(24).copy()
         ohlc_df = pd.DataFrame({
             "timestamp": hist_tail["timestamp"],
@@ -2868,74 +3001,6 @@ if not hist_df.empty:
 
 else:
     st.warning("⚠️ No wallet history found. Please wait for logger to collect data.")
-
-# st.write("### 📊 Live BTC Chart")
-
-# @st.cache_data(ttl=300)
-# def get_hourly_klines():
-#     try:
-#         data = client.get_historical_klines(
-#             "BTCUSDT",
-#             Client.KLINE_INTERVAL_1HOUR,
-#             "7 day ago UTC"
-#         )
-#         df = pd.DataFrame(data, columns=[
-#             "timestamp", "open", "high", "low", "close", "volume",
-#             "close_time", "quote_asset_volume", "number_of_trades",
-#             "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
-#         ])
-#         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-#         df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
-#         return df[["timestamp", "open", "high", "low", "close"]]
-#     except Exception as e:
-#         st.error(f"Error fetching data: {e}")
-#         return pd.DataFrame()
-
-# # Date selection
-# st.write("Select Date Range:")
-# date_col1, date_col2 = st.columns(2)
-# with date_col1:
-#     start_date = st.date_input("From", value=datetime.today() - timedelta(days=3))
-# with date_col2:
-#     end_date = st.date_input("To", value=datetime.today())
-
-# hist_df = get_hourly_klines()
-# if not hist_df.empty:
-#     filtered_df = hist_df[
-#         (hist_df['timestamp'].dt.date >= start_date) &
-#         (hist_df['timestamp'].dt.date <= end_date)
-#     ]
-    
-#     if filtered_df.empty:
-#         filtered_df = hist_df.tail(24)  # Show last 24 hours if empty
-    
-#     fig = go.Figure(go.Candlestick(
-#         x=filtered_df['timestamp'],
-#         open=filtered_df['open'],
-#         high=filtered_df['high'],
-#         low=filtered_df['low'],
-#         close=filtered_df['close'],
-#         increasing_line_color='green',
-#         decreasing_line_color='red'
-#     ))
-    
-#     fig.update_layout(
-#         xaxis_rangeslider_visible=True,
-#         margin=dict(l=20, r=20, t=20, b=20),
-#         height=400,
-#         xaxis=dict(
-#             rangeselector=dict(
-#                 buttons=list([
-#                     dict(count=12, label="12h", step="hour", stepmode="backward"),
-#                     dict(count=1, label="24h", step="day", stepmode="backward"),
-#                     dict(count=3, label="3d", step="day", stepmode="backward"),
-#                     dict(step="all")
-#                 ])
-#             )
-#         )
-#     )
-    
-#     st.plotly_chart(fig, use_container_width=True)
 
 # --- rerun for auto-refresh ---
 time.sleep(10)
