@@ -352,17 +352,17 @@ def migrate_postgres_tables():
     cursor.execute("ALTER TABLE wallet_transactions ALTER COLUMN is_autotrade_marker TYPE BOOLEAN USING (is_autotrade_marker::INTEGER <> 0);")
 
 #------ Temprary Cleaning purpose ------##
-    cursor.execute("TRUNCATE wallet_history;")
-    cursor.execute("TRUNCATE wallet_transactions;")
-    cursor.execute("TRUNCATE inr_wallet_transactions;")
-    cursor.execute("TRUNCATE user_wallets;")
+    # cursor.execute("TRUNCATE wallet_history;")
+    # cursor.execute("TRUNCATE wallet_transactions;")
+    # cursor.execute("TRUNCATE inr_wallet_transactions;")
+    # cursor.execute("TRUNCATE user_wallets;")
 
     conn.commit()
     cursor.close()
     conn.close()
     st.success("✅ Migration completed! All tables updated with safe defaults.")
 
-migrate_postgres_tables()
+# migrate_postgres_tables()
 
 def get_btc_price():
     """
