@@ -539,35 +539,45 @@ BTC_WALLET_NAME = "btc_autotrade_live"
 
 # 🔐 Paytm Credentials
 
-TEST_MID = os.getenv("TEST_MID", "")
-TEST_KEY = os.getenv("TEST_KEY", "")  # Paytm staging default key
-TEST_WEBSITE = os.getenv("TEST_WEBSITE", "")
-TEST_CALLBACK = os.getenv("TEST_CALLBACK", "")
-TEST_BASE_URL = os.getenv("TEST_BASE_URL", "")
+# TEST_MID = os.getenv("TEST_MID", "")
+# TEST_KEY = os.getenv("TEST_KEY", "")  # Paytm staging default key
+# TEST_WEBSITE = os.getenv("TEST_WEBSITE", "")
+# TEST_CALLBACK = os.getenv("TEST_CALLBACK", "")
+# TEST_BASE_URL = os.getenv("TEST_BASE_URL", "")
 
-LIVE_MID = os.getenv("LIVE_MID", "")
-LIVE_KEY = os.getenv("LIVE_KEY", "")
-LIVE_WEBSITE = os.getenv("LIVE_WEBSITE", "")
-LIVE_CALLBACK = os.getenv("LIVE_CALLBACK", "")
-LIVE_BASE_URL = os.getenv("LIVE_BASE_URL", "")
+# LIVE_MID = os.getenv("LIVE_MID", "")
+# LIVE_KEY = os.getenv("LIVE_KEY", "")
+# LIVE_WEBSITE = os.getenv("LIVE_WEBSITE", "")
+# LIVE_CALLBACK = os.getenv("LIVE_CALLBACK", "")
+# LIVE_BASE_URL = os.getenv("LIVE_BASE_URL", "")
 
-PAYTM_CLIENT_ID = os.getenv("PAYTM_CLIENT_ID", "")
-PAYTM_CLIENT_SECRET = os.getenv("PAYTM_CLIENT_SECRET", "")
-OAUTH_URL = os.getenv("OAUTH_URL", "")
-PAYOUT_URL = os.getenv("PAYOUT_URL", "")
+# PAYTM_CLIENT_ID = os.getenv("PAYTM_CLIENT_ID", "")
+# PAYTM_CLIENT_SECRET = os.getenv("PAYTM_CLIENT_SECRET", "")
+# OAUTH_URL = os.getenv("OAUTH_URL", "")
+# PAYOUT_URL = os.getenv("PAYOUT_URL", "")
 
-if REAL_TRADING:
-    PAYTM_MID = LIVE_MID
-    PAYTM_MERCHANT_KEY = LIVE_KEY
-    PAYTM_WEBSITE = LIVE_WEBSITE
-    PAYTM_CALLBACK_URL = LIVE_CALLBACK
-    PAYTM_BASE_URL = LIVE_BASE_URL
-else:
-    PAYTM_MID = TEST_MID
-    PAYTM_MERCHANT_KEY = TEST_KEY
-    PAYTM_WEBSITE = TEST_WEBSITE
-    PAYTM_CALLBACK_URL = TEST_CALLBACK
-    PAYTM_BASE_URL = TEST_BASE_URL
+# if REAL_TRADING:
+#     PAYTM_MID = LIVE_MID
+#     PAYTM_MERCHANT_KEY = LIVE_KEY
+#     PAYTM_WEBSITE = LIVE_WEBSITE
+#     PAYTM_CALLBACK_URL = LIVE_CALLBACK
+#     PAYTM_BASE_URL = LIVE_BASE_URL
+# else:
+#     PAYTM_MID = TEST_MID
+#     PAYTM_MERCHANT_KEY = TEST_KEY
+#     PAYTM_WEBSITE = TEST_WEBSITE
+#     PAYTM_CALLBACK_URL = TEST_CALLBACK
+#     PAYTM_BASE_URL = TEST_BASE_URL
+
+# -----------------------------
+# UroPay configuration
+# -----------------------------
+UROPAY_API_KEY = os.getenv("UROPAY_API_KEY", "")
+UROPAY_API_SECRET = os.getenv("UROPAY_API_SECRET", "")
+UROPAY_WEBHOOK_SECRET = os.getenv("UROPAY_WEBHOOK_SECRET", "")  # HMAC secret for webhook verification
+UROPAY_API_BASE = os.getenv("UROPAY_API_BASE", "https://api.uropay.me")  # placeholder
+REAL_TRADING = os.getenv("REAL_TRADING", "False").lower() in ("1", "true", "yes")
+
    
 CUSTOMER_ID = os.getenv("CUSTOMER_ID", "")
 # --- MySQL Connection ---
@@ -725,7 +735,8 @@ def reverse_inr_wallet(amount, payment_id):
 
 
 # --- QR Code Generator ---
-def generate_qr_code(data: str):
+# def generate_qr_code_15_11_2025(data: str):
+def generate_qr_code(data: str) -> bytes:
     qr = qrcode.QRCode(box_size=6, border=2)
     qr.add_data(data)
     qr.make(fit=True)
@@ -734,6 +745,131 @@ def generate_qr_code(data: str):
     img.save(buffer, format='PNG')
     buffer.seek(0)
     return buffer.getvalue()
+
+def make_order_id(prefix="UROPAY"):
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+# -----------------------------
+# Create UroPay payment link
+# -----------------------------
+def create_uropay_payment_link(amount_inr: float, customer_id: str = None, description: str = None):
+    """
+    Returns dict:
+      { link, order_id, qr (png bytes), mode, raw_resp (if LIVE) }
+    TEST mode returns a localhost simulate_deposit link that credits immediately when called.
+    LIVE mode calls UroPay API (adjust endpoint/payload per UroPay docs).
+    """
+    amount = float(amount_inr)
+    order_id = make_order_id()
+
+    if not REAL_TRADING:
+        # Simulated link for local dev (Streamlit default port 8501)
+        simulation_url = f"http://localhost:5001/simulate_deposit?order_id={order_id}&amount={amount:.2f}"
+        qr = generate_qr_code(simulation_url)
+        return {"link": simulation_url, "order_id": order_id, "qr": qr, "mode": "TEST"}
+
+    # LIVE mode: call UroPay API (placeholder endpoint/payload — update per UroPay docs)
+    url = f"{UROPAY_API_BASE}/v1/payment_links"  # change if necessary
+    payload = {
+        "order_id": order_id,
+        "amount": float(amount),
+        "currency": "INR",
+        "description": description or f"Deposit INR {amount:.2f}",
+        "customer_id": customer_id or "",
+    }
+    headers = {
+        "Content-Type": "application/json",
+    }
+    # If API key required, include it
+    if UROPAY_API_KEY:
+        headers["Authorization"] = f"Bearer {UROPAY_API_KEY}"
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        link = data.get("link") or data.get("url") or data.get("payment_url")
+        if not link:
+            raise Exception("UroPay returned no payment link: " + str(data))
+        qr = generate_qr_code(link)
+        return {"link": link, "order_id": order_id, "qr": qr, "mode": "LIVE", "raw_resp": data}
+    except Exception as e:
+        raise Exception(f"UroPay create link failed: {e}")
+
+# -----------------------------
+# Webhook verification
+# -----------------------------
+def verify_uropay_webhook(signature_header: str, payload_bytes: bytes) -> bool:
+    """
+    Default: HMAC-SHA256 using UROPAY_WEBHOOK_SECRET over the raw request body.
+    signature_header may be "sha256=<hex>" or hex string.
+    If UROPAY_WEBHOOK_SECRET is empty, verification fails (safe default).
+    """
+    if not UROPAY_WEBHOOK_SECRET:
+        return False
+    try:
+        computed = hmac.new(UROPAY_WEBHOOK_SECRET.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+        sig = signature_header or ""
+        if sig.startswith("sha256="):
+            sig = sig.split("=", 1)[1]
+        return hmac.compare_digest(computed, sig)
+    except Exception:
+        return False
+    
+# If any of those functions are missing at import-time, define safe placeholders to avoid runtime errors.
+def _safe_credit_inr_wallet(amount, payment_id):
+    try:
+        credit_inr_wallet(amount, payment_id)
+    except NameError:
+        # placeholder behavior: write to DB directly
+        conn = get_mysql_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
+                row = cur.fetchone()
+                balance = float(row[0]) if row and row[0] is not None else 0.0
+                new_balance = balance + amount
+                cur.execute("""
+                    INSERT INTO inr_wallet_transactions
+                    (trade_time, action, amount, balance_after, trade_mode, payment_id, status)
+                    VALUES (NOW(), 'DEPOSIT', %s, %s, 'LIVE', %s, 'COMPLETED')
+                """, (amount, new_balance, payment_id))
+                conn.commit()
+                conn.close()
+
+def _safe_log_inr_transaction(action, amount, balance, mode="LIVE"):
+    try:
+        log_inr_transaction(action, amount, balance, mode)
+    except NameError:
+        # fallback: insert minimally
+        conn = get_mysql_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO inr_wallet_transactions
+                    (trade_time, action, amount, balance_after, trade_mode, payment_id, status)
+                    VALUES (NOW(), %s, %s, %s, %s, %s, %s)
+                """, (action, amount, balance, mode, None, "SUCCESS"))
+                conn.commit()
+                conn.close()
+
+def _safe_get_current_inr_balance():
+    try:
+        return get_current_inr_balance()
+    except NameError:
+        conn = get_mysql_connection()
+        if not conn:
+            return 0.0
+        cur = conn.cursor()
+        cur.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            try:
+                return float(row[0])
+            except Exception:
+                return 0.0
+        return 0.0
 
 # --- Wallet Setup ---
 
@@ -2213,62 +2349,6 @@ if st.button("🧾 Create Paytm Order"):
         st.error("❌ Failed to generate Paytm order. See response below.")
         st.write(res)
 
-
-# ✅ Withdrawal Simulation
-# st.subheader("🏧 Wallet Withdraw")
-# payout_amt = st.number_input("Payout ₹", 100, step=100, key="paytm_withdraw")
-# if st.button("🚀 Withdraw"):
-#     if payout_amt <= st.session_state["inr_balance"]:
-#         st.session_state["inr_balance"] -= payout_amt
-#         if REAL_TRADING:
-#             st.success(f"✅ ₹{payout_amt:.2f} withdrawal logged (Production mode - handle actual payout)")
-#             recipients = get_all_recipients()
-#             recipient_names = [f"{r['name']} ({r['method']})" for r in recipients]
-#             selected = st.selectbox("Saved Recipient", ["-- New Recipient --"] + recipient_names)
-
-#             if selected != "-- New Recipient --":
-#                 sel = recipients[recipient_names.index(selected) - 1]
-#                 method = sel['method']
-#                 name = sel['name']
-#                 acc_no = sel['account_number']
-#                 ifsc = sel['ifsc']
-#                 upi = sel['upi_id']
-#             else:
-#                 method = st.radio("Send via", ["BANK", "UPI"])
-#                 name = st.text_input("Recipient Name")
-#                 acc_no = st.text_input("Account Number") if method == "BANK" else ""
-#                 ifsc = st.text_input("IFSC Code") if method == "BANK" else ""
-#                 upi = st.text_input("UPI ID") if method == "UPI" else ""
-
-#             amount = st.number_input("Amount ₹", 100.0, step=100.0)
-
-#             if st.button("🚀 Pay Now"):
-#                 if amount > get_inr_balance():
-#                     st.error("❌ Insufficient balance")
-#                 elif not name or (method == "BANK" and (not acc_no or not ifsc)) or (method == "UPI" and not upi):
-#                     st.warning("⚠️ Fill all fields")
-#                 else:
-#                     with st.spinner("Processing..."):
-#                         order_id = f"WD{uuid.uuid4().hex[:8].upper()}"
-#                         token = get_access_token()
-#                         res = send_paytm_payout(token, order_id, amount, name, method, acc_no, ifsc, upi)
-#                         status = res.get("status", "FAILED")
-
-#                         log_payout(order_id, name, method, acc_no, ifsc, upi, amount, status, res)
-#                         save_recipient_if_new(name, method, acc_no, ifsc, upi)
-
-#                         if status == "SUCCESS":
-#                             deduct_balance(amount)
-#                             st.success(f"✅ ₹{amount:.2f} sent to {name}")
-#                         else:
-#                             st.error("❌ Payout failed")
-#                         st.json(res)
-#         else:
-#             st.success(f"✅ ₹{payout_amt:.2f} withdrawn (Simulated - TEST)")
-#     else:
-#         st.error("❌ Not enough balance")
-
-
 # Code changed on 28-08-2025 for withdrawal button login
 st.subheader("🏧 Withdraw to Bank / UPI")
 
@@ -2310,81 +2390,6 @@ if st.button("🚀 Withdraw"):
             st.session_state["inr_balance"] = get_current_inr_balance()
             send_telegram(f"✅ ₹{payout_amt:.2f} payout sent to {name} via {method}")
             st.success(f"✅ ₹{payout_amt:.2f} sent to {name}")
-
-# CODE CHANGES ENDED FOR WITHDRAWAL BUTTON LOGIC -----
-
-# if st.button("🚀 Withdraw"):
-#     if method == "BANK" and (not acc_no or not ifsc):
-#         st.warning("❗ Please enter bank details.")
-#     elif method == "UPI" and not upi:
-#         st.warning("❗ Please enter UPI ID.")
-#     elif not name:
-#         st.warning("❗ Name is required.")
-#     else:
-#         save_recipient_if_new(name, method, acc_no, ifsc, upi)
-#         real_balance = get_current_inr_balance()
-
-#         if payout_amt > real_balance:
-#             st.error("❌ Insufficient balance")
-#         else:
-#             # ✅ Deduct + Log with full details
-#             deduct_balance(payout_amt, method, name, acc_no, ifsc, upi)
-
-#             # ✅ Refresh session balance
-#             st.session_state["inr_balance"] = get_current_inr_balance()
-
-#             # ✅ Notify
-#             send_telegram(f"✅ ₹{payout_amt:.2f} payout sent to {name} via {method}")
-#             st.success(f"✅ ₹{payout_amt:.2f} sent to {name} via {method}")
-
-# # --- Show Current INR Wallet (for simulation) ---
-st.info(f"💼 Current INR Wallet Balance: ₹{st.session_state['inr_balance']:.2f}")
-
-# --- INR Wallet Actions ---
-# st.write("### 🏦 INR Wallet Actions")
-
-# inr_deposit = st.number_input("Deposit INR", min_value=0, step=100, key="inr_deposit")
-# inr_withdraw = st.number_input("Withdraw INR", min_value=0, step=100, key="inr_withdraw")
-
-# if st.button("Process INR Wallet Transaction"):
-#     if inr_deposit > 0:
-#         INR_WALLET['balance'] += inr_deposit
-#         log_inr_transaction("DEPOSIT", inr_deposit, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-#         st.success(f"✅ Deposited ₹{inr_deposit}")
-#     elif inr_withdraw > 0:
-#         if INR_WALLET['balance'] >= inr_withdraw:
-#             INR_WALLET['balance'] -= inr_withdraw
-#             log_inr_transaction("WITHDRAW", -inr_withdraw, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-#             st.success(f"✅ Withdrew ₹{inr_withdraw}")
-#         else:
-#             st.error("❌ Insufficient INR Balance")
-
-
-
-# st.write("### 🏦 INR Wallet Actions")
-
-# inr_deposit = st.number_input("Deposit INR", min_value=0, step=100, key="inr_deposit")
-# inr_withdraw = st.number_input("Withdraw INR", min_value=0, step=100, key="inr_withdraw")
-
-# if st.button("Process INR Wallet Transaction"):
-#     current_balance = get_razorpay_balance()
-#     trade_mode = "LIVE" if REAL_TRADING else "TEST"
-
-#     if inr_deposit > 0:
-#         if current_balance >= inr_deposit:
-#             INR_WALLET['balance'] += inr_deposit
-#             log_inr_transaction("DEPOSIT", inr_deposit, INR_WALLET['balance'], trade_mode)
-#             st.success(f"✅ Deposited ₹{inr_deposit}")
-#         else:
-#             st.error("❌ Insufficient Razorpay balance for deposit")
-
-#     elif inr_withdraw > 0:
-#         if INR_WALLET['balance'] >= inr_withdraw:
-#             INR_WALLET['balance'] -= inr_withdraw
-#             log_inr_transaction("WITHDRAW", -inr_withdraw, INR_WALLET['balance'], trade_mode)
-#             st.success(f"✅ Withdrew ₹{inr_withdraw}")
-#         else:
-#             st.error("❌ Insufficient INR Wallet balance")
 
 
 # --- Testing Mode ----
@@ -2447,28 +2452,6 @@ with col3:
         BTC_WALLET['balance'] = 0.005
         log_wallet_transaction("RESET", 0, BTC_WALLET['balance'], price_inr, trade_type="MANUAL_RESET_BALANCE")
         update_wallet_daily_summary(start=False)
-
-# # --- Wallet Status OLD---
-# st.write("### 💼 Wallet Status")
-# wallet_col1, wallet_col2 = st.columns(2)
-# with wallet_col1:
-#     st.metric("BTC Balance", f"{BTC_WALLET['balance']:.4f} BTC")
-# with wallet_col2:
-#     st.metric("INR Value", f"₹{BTC_WALLET['balance'] * price_inr:,.2f}")
-
-#     balance = INR_WALLET.get("balance", 0)
-
-#     # If it's a tuple, pick first element
-#     if isinstance(balance, tuple):
-#         balance = balance[0] if balance else 0
-
-#     try:
-#         balance = float(balance)
-#     except (TypeError, ValueError):
-#         balance = 0
-
-#     st.metric("INR Wallet Balance", f"₹{balance:,.2f}")
-    # st.metric("INR Wallet Balance", f"₹{INR_WALLET['balance']:,.2f}")
 
 # --- Wallet Status ---
 st.write("### 💼 Wallet Status")
@@ -2544,13 +2527,6 @@ if not db_active and last_trade_time:
         st.warning(msg)
         st.toast(msg)
 
-# ------------------ START BACKGROUND THREAD ------------------
-
-# if "autotrade_thread_started" not in st.session_state:
-#     st.session_state.autotrade_thread_started = True
-#     t = threading.Thread(target=background_autotrade_loop, daemon=True)
-#     t.start()
-
 # --- Auto Trade Button ---
 autotrade_active = get_autotrade_active_from_db()
 
@@ -2572,132 +2548,6 @@ if st.button(f"{'🚀 Start' if not autotrade_active else '🛑 Stop'} Auto-Trad
 
     st.toast(msg)
     send_telegram(msg)
-
-# st.write("### ⚡ Auto-Trading")
-# if "autotrade_toggle" not in st.session_state:
-#     st.session_state["autotrade_toggle"] = False
-
-# autotrade_toggle = st.toggle(
-#     "Enable Auto-Trade",
-#     value=st.session_state["autotrade_toggle"],
-#     help="Turn ON/OFF auto trading"
-# )
-
-# # --- Handle toggle changes ---
-# if autotrade_toggle and not st.session_state["autotrade_toggle"]:
-#     # User switched ON
-#     start_autotrade()
-#     st.session_state["autotrade_toggle"] = True
-
-# elif not autotrade_toggle and st.session_state["autotrade_toggle"]:
-#     # User switched OFF
-#     stop_autotrade("🛑 Auto-Trade stopped manually.")
-#     st.session_state["autotrade_toggle"] = False
-
-
-# --- Auto Trade Button old on 29-08-2025---
-# if st.button(f"{'🚀 Start' if not st.session_state.autotrade_toggle else '🛑 Stop'} Auto-Trade"):
-#     st.session_state.autotrade_toggle = not st.session_state.autotrade_toggle
-#     st.session_state.AUTO_TRADING["active"] = st.session_state.autotrade_toggle
-    
-#     if st.session_state.autotrade_toggle:
-#         # Initialize auto-trade
-#         st.session_state.AUTO_TRADING.update({
-#             "last_price": price_inr,
-#             "sell_streak": 0
-#         })
-#         st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
-#         st.session_state.last_trade_time = datetime.now()
-#         msg = f"🚀 Auto-Trade ACTIVATED at ₹{price_inr:.2f}"
-
-#         # ✅ Persist to DB
-#         log_wallet_transaction("AUTO_START", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_START")
-#         log_inr_transaction("AUTO_START", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-#         update_autotrade_status_db(1)  # DB flag → thread picks up
-#     else:
-#         update_wallet_daily_summary(auto_end=True)
-#         msg = f"🛑 Auto-Trade STOPPED at ₹{price_inr:.2f}"
-
-#         log_wallet_transaction("AUTO_STOP", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_STOP")
-#         log_inr_transaction("AUTO_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-#         update_autotrade_status_db(0)  # DB flag → thread stops
-    
-#     st.toast(msg)
-#     send_telegram(msg)
-#     log_wallet_transaction("AUTO_TRADE_TOGGLE", 0, BTC_WALLET['balance'], price_inr, 
-#                          "AUTO_TRADE_START" if st.session_state.autotrade_toggle else "AUTO_TRADE_STOP")
-
-
-# # --- Auto Trade Button OLD ---
-# if st.button(f"{'🚀 Start' if not st.session_state.autotrade_toggle else '🛑 Stop'} Auto-Trade"):
-#     st.session_state.autotrade_toggle = not st.session_state.autotrade_toggle
-#     st.session_state.AUTO_TRADING["active"] = st.session_state.autotrade_toggle
-    
-#     if st.session_state.autotrade_toggle:
-#         # Initialize auto-trade
-#         st.session_state.AUTO_TRADING.update({
-#             "last_price": price_inr,
-#             "sell_streak": 0
-#         })
-#         st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
-#         msg = f"🚀 Auto-Trade ACTIVATED at ₹{price_inr:.2f}"
-
-#         # ✅ Log clean START marker
-#         log_wallet_transaction("AUTO_START", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_START")
-#         log_inr_transaction("AUTO_START", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-#         update_autotrade_status_db(1)
-#     else:
-#         update_wallet_daily_summary(auto_end=True)
-#         msg = f"🛑 Auto-Trade STOPPED at ₹{price_inr:.2f}"
-
-#         # ✅ Log clean STOP marker
-#         log_wallet_transaction("AUTO_STOP", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_STOP")
-#         log_inr_transaction("AUTO_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-#         update_autotrade_status_db(0)
-    
-#     st.toast(msg)
-#     send_telegram(msg)
-#     log_wallet_transaction("AUTO_TRADE_TOGGLE", 0, BTC_WALLET['balance'], price_inr, 
-#                          "AUTO_TRADE_START" if st.session_state.autotrade_toggle else "AUTO_TRADE_STOP")
-#  OLD BUTTON DESIGN FINISH #####
-# if st.button(f"{'🚀 Start' if not st.session_state.autotrade_toggle else '🛑 Stop'} Auto-Trade"):
-#     # Flip toggle
-#     st.session_state.autotrade_toggle = not st.session_state.autotrade_toggle
-#     st.session_state.AUTO_TRADING["active"] = st.session_state.autotrade_toggle
-    
-#     if st.session_state.autotrade_toggle:
-#         # --- START ---
-#         if not get_autotrade_active_from_db():   # ✅ only insert if not already active
-#             st.session_state.AUTO_TRADING.update({
-#                 "last_price": price_inr,
-#                 "sell_streak": 0
-#             })
-#             st.session_state.AUTO_TRADE_STATE["entry_price"] = price_inr
-#             msg = f"🚀 Auto-Trade ACTIVATED at ₹{price_inr:.2f}"
-            
-#             # ✅ Log clean START marker
-#             log_wallet_transaction("AUTO_START", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_START")
-#             log_inr_transaction("AUTO_START", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-#             update_autotrade_status_db(1)
-#         else:
-#             msg = "⚠️ Auto-Trade is already active — ignoring duplicate START."
-
-#     else:
-#         # --- STOP ---
-#         if get_autotrade_active_from_db():   # ✅ only insert if currently active
-#             update_wallet_daily_summary(auto_end=True)
-#             msg = f"🛑 Auto-Trade STOPPED at ₹{price_inr:.2f}"
-            
-#             # ✅ Log clean STOP marker
-#             log_wallet_transaction("AUTO_STOP", 0, BTC_WALLET['balance'], price_inr, "AUTO_TRADE_STOP")
-#             log_inr_transaction("AUTO_STOP", 0, INR_WALLET['balance'], "LIVE" if REAL_TRADING else "TEST")
-#             update_autotrade_status_db(0)
-#         else:
-#             msg = "⚠️ Auto-Trade is already stopped — ignoring duplicate STOP."
-
-#     st.toast(msg)
-#     send_telegram(msg)
-
 
 # --- BTC Wallet Address Display ---
 if REAL_TRADING:
