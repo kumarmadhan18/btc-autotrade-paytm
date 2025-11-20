@@ -297,7 +297,7 @@ def init_mysql_tables():
     conn.close()
     st.success("✅ PostgreSQL tables initialized successfully!")
     
-init_mysql_tables()
+# init_mysql_tables()
 
 def migrate_postgres_tables():
     conn = get_mysql_connection()
@@ -362,7 +362,7 @@ def migrate_postgres_tables():
     conn.close()
     st.success("✅ Migration completed! All tables updated with safe defaults.")
 
-migrate_postgres_tables()
+# migrate_postgres_tables()
 
 def get_btc_price():
     """
