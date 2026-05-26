@@ -1,0 +1,44 @@
+# Web UI
+streamlit
+flask
+plotly
+python-dotenv
+
+# Binance API
+python-binance
+
+# Bitcoin Wallet
+bitcoinlib
+
+# Database
+pymysql
+sqlalchemy
+psycopg2-binary
+
+# Payment Gateway
+paytmchecksum
+razorpay
+
+# QR / Images
+qrcode
+Pillow
+
+# Async & Networking
+aiohttp
+requests
+
+# Security & Crypto
+cryptography
+pycryptodome
+
+# Data / Utils
+pandas
+
+# Production WSGI server (for Flask apps)
+gunicorn
+
+# Needed for pkg_resources
+setuptools
+
+# TO Connect Paytm wallet to your bank account checksum library
+pycryptodome
