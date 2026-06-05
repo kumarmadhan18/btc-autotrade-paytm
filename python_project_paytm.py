@@ -1,95 +1,45 @@
 # ============================================================
-# MM BTC Autotrade Pro BOT — CORRECTED FOR LIVE TRADING
+# MM BTC Autotrade Pro BOT — RENDER.COM PRODUCTION READY
+# Version: 3.0 | Python 3.11 | Streamlit
 #
-# ORIGINAL FIXES (v1):
-#   1.  CRITICAL: withdraw_inr() call — wrong kwarg names fixed
-#       (acc_no → account, upi → upi_id)
-#   2.  CRITICAL: check_auto_sell() now calls place_market_sell()
-#       in LIVE mode instead of silently zeroing internal balance
-#   3.  CRITICAL: UROPAY_WEBHOOK_SECRET typo fixed →
-#       RAZORPAY_WEBHOOK_SECRET
-#   4.  CRITICAL: get_entry_price / save_entry_price /
-#       clear_entry_price / get_current_inr_balance /
-#       get_latest_inr_balance — all guard conn=None to prevent
-#       AttributeError crash in DB-outage scenarios
-#   5.  LOGIC: check_balance_health() — condition was inverted
-#       (was: diff > 1000, should be: diff < -1000) for drop detection
-#   6.  LOGIC: update_wallet_daily_summary(start=True) — added
-#       INSERT...ON CONFLICT / INSERT IGNORE so repeated page
-#       refreshes don't create duplicate rows for the same day
-#   7.  LOGIC: Idle timeout in check_auto_trading() — query now
-#       excludes AUTO_META rows so marker inserts don't reset the
-#       idle clock
-#   8.  SECURITY: deduct_balance() hardcoded email replaced with
-#       CUSTOMER_EMAIL env var (falls back to CUSTOMER_ID)
-#   9.  SECURITY: Razorpay webhook verification now uses the
-#       corrected RAZORPAY_WEBHOOK_SECRET constant
-#  10.  ROBUSTNESS: _poll_order_status partial-fill handling —
-#       warns and logs if order is still open after timeout
-#  11.  ROBUSTNESS: place_market_buy / place_market_sell — minimum
-#       quantity guard (CoinDCX BTCINR min: 0.0001 BTC)
+# REQUIRED ENV VARS ON RENDER:
+#   APP_ENV                = live
+#   REAL_TRADING           = true   (or false for test mode)
+#   COINDCX_API_KEY        = your_coindcx_api_key
+#   COINDCX_API_SECRET     = your_coindcx_api_secret
+#   RAZORPAY_KEY_ID        = rzp_live_xxxxxxxxxxxx
+#   RAZORPAY_KEY_SECRET    = your_razorpay_secret
+#   RAZORPAY_WEBHOOK_SECRET= your_webhook_secret
+#   PG_HOST                = your_postgres_host
+#   PG_USER                = your_postgres_user
+#   PG_PASSWORD            = your_postgres_password
+#   PG_DB                  = your_postgres_db
+#   PG_PORT                = 5432
+#   BOT_TOKEN              = your_telegram_bot_token
+#   CHAT_ID                = your_telegram_chat_id
+#   ENABLE_NOTIFICATIONS   = true
+#   CUSTOMER_EMAIL         = your@email.com
+#   BTC_WALLET_NAME        = btc_autotrade_live
 #
-# ADDITIONAL FIXES (v2):
-#  12.  CRITICAL: st.set_page_config() moved to first Streamlit
-#       command (was at line ~2116 — caused StreamlitAPIException
-#       on startup because st.error() in helper functions fires first)
-#  13.  CRITICAL: Removed unused Flask import (caused ImportError
-#       if flask not in requirements.txt — Flask is for webhook.py)
-#  14.  CRITICAL: Removed unused AES import (caused ImportError
-#       if pycryptodome not installed)
-#  15.  CRITICAL: wallet_history.trade_date — added UNIQUE constraint
-#       so PostgreSQL ON CONFLICT (trade_date) DO NOTHING works
-#  16.  CRITICAL: psycopg2 cursor_factory — moved from post-assignment
-#       (conn.cursor_factory=...) to connect() kwarg — the old way
-#       was silently ignored by psycopg2
-#  17.  CRITICAL: deduct_balance() — replaced 'with get_cursor()'
-#       context manager (pymysql DictCursor doesn't support 'with')
-#       with plain assignment + fixed indentation
-#  18.  CRITICAL: acquire_trade_lock() — replaced SELECT+UPDATE
-#       race condition with atomic conditional UPDATE WHERE
-#       is_locked=FALSE, checking rowcount for success
-#  19.  CRITICAL: REAL_TRADING global scope — added is_live() helper
-#       so all functions read the correct runtime value even after
-#       UI radio reassignment. Replaced 28 inline references.
-#  20.  CRITICAL: wallet.balance() — guarded None return on network
-#       failure (was: TypeError: NoneType / float)
-#  21.  CRITICAL: get_btc_price() — CoinDCX has no BTCUSDT pair.
-#       Replaced with CoinGecko public API + INR/USD fallback
-#  22.  LOGIC: start_autotrade() / stop_autotrade() — wired into
-#       the UI Start/Stop button (was calling update_autotrade_
-#       status_db directly, bypassing wallet state sync)
-#  23.  LOGIC: Idle timeout tightened 1800s → 300s for supervised
-#       manual sessions
-#  24.  ROBUSTNESS: log_stop_loss_event() — added try/finally so
-#       conn.close() always runs (was leaking DB connections)
-#  25.  ROBUSTNESS: get_wallet_history() — replaced 'with get_cursor()'
-#       with plain assignment (pymysql DictCursor fix) + added
-#       except block to return empty DataFrame on error
-#  26.  UX: Auto-refresh changed from blocking time.sleep(60)+
-#       st.rerun() to non-blocking meta http-equiv refresh — app
-#       stays responsive during the 60s wait
-#  27.  UX: Deposit flow — auto-refresh now fully suppressed during
-#       Razorpay payment. Reload only fires on SUCCESS (not dismiss).
-#       Separate Cancel / I Already Paid buttons. 10-min hard timeout.
-#  28.  UX: Session-lost warning — banner shown if auto-trade is
-#       active in DB when a new tab/session opens
-#  29.  SAFETY: Telegram /stop emergency kill switch added —
-#       poll_telegram_stop_command() checked at start of every
-#       auto-trade cycle
+# RENDER SERVICES NEEDED:
+#   1. Web Service  → btc_autotrade_fixed.py  (this file)
+#      Start cmd: streamlit run btc_autotrade_fixed.py --server.port $PORT
+#   2. Web Service  → webhook.py
+#      Start cmd: python webhook.py
+#   3. PostgreSQL   → shared by both services
 #
-# Required .env variables:
-#   RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET
-#   RAZORPAY_ACCOUNT_NUMBER   (for payouts — Razorpay X account)
-#   COINDCX_API_KEY, COINDCX_API_SECRET
-#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-#   APP_ENV=live              (switches to PostgreSQL + locks REAL_TRADING)
-#   REAL_TRADING=true         (enables live order placement)
-#   PG_HOST, PG_USER, PG_PASSWORD, PG_DB, PG_PORT
-#   MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB, MYSQL_PORT  (local only)
-#   CUSTOMER_EMAIL            (email of the wallet owner for deduct_balance)
-#   RENDER_APP_URL            (optional — for uptime monitor)
+# AUTO-TRADE LOGIC:
+#   STATE A (Have BTC) → SELL when price ≥ entry × (1 + target%)
+#   STATE B (Have INR) → BUY  when price ≤ last_sell × (1 - target%)
+#   Default target: 1.5% (covers 1.354% total charges + ~0.15% net profit)
+#   Charges breakdown per cycle:
+#     CoinDCX taker fee : 0.15% buy + 0.15% sell = 0.30%
+#     GST on fees       : 18% of 0.30%           = 0.054%
+#     TDS on sell       : 1.0%                   = 1.00%
+#     Total             :                          1.354% breakeven
+#     Recommended min   :                          1.5% target
+#   Stop-Loss: 2% below entry (configurable in UI settings)
 # ============================================================
-
 import smtplib
 import requests
 import pandas as pd
@@ -652,31 +602,101 @@ def usd_to_inr(usd):
 
 
 # ─────────────────────────────────────────
-# Wallet Balance Helpers
+# CoinDCX API — Live Balance Fetcher
+# Calls /exchange/v1/users/balances directly.
+# Returns a dict keyed by currency, e.g. {"INR": 5000.0, "BTC": 0.0012}
+# ─────────────────────────────────────────
+def _fetch_coindcx_balances() -> dict:
+    """
+    Fetches all wallet balances from CoinDCX via authenticated API.
+    Returns dict like {"INR": 5000.0, "BTC": 0.00123, ...} or {} on failure.
+    """
+    try:
+        timestamp_ms = str(int(time.time() * 1000))
+        body = json.dumps({"timestamp": timestamp_ms}, separators=(",", ":"))
+        signature = hmac.new(
+            API_SECRET.encode("utf-8"),
+            body.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        headers = {
+            "Content-Type": "application/json",
+            "X-AUTH-APIKEY": API_KEY,
+            "X-AUTH-SIGNATURE": signature,
+        }
+        resp = requests.post(
+            f"{BASE_URL}/exchange/v1/users/balances",
+            data=body,
+            headers=headers,
+            timeout=10
+        )
+        resp.raise_for_status()
+        balances = {}
+        for item in resp.json():
+            currency = item.get("currency", "").upper()
+            balance  = float(item.get("balance", 0.0))
+            if currency:
+                balances[currency] = balance
+        return balances
+    except Exception as e:
+        print(f"❌ CoinDCX balance fetch failed: {e}")
+        return {}
+
+
+# ─────────────────────────────────────────
+# Wallet Balance Helpers  (now live from CoinDCX API)
 # ─────────────────────────────────────────
 def sync_inr_wallet(mode="LIVE"):
-    try:
-        conn = get_mysql_connection()
-        if not conn:
+    """
+    Fetches INR balance directly from CoinDCX API.
+    Falls back to DB if API call fails or in TEST mode.
+    """
+    if not is_live():
+        # TEST mode — keep using DB records
+        try:
+            conn = get_mysql_connection()
+            if not conn:
+                return None
+            cursor = get_cursor(conn)
+            cursor.execute("""
+                SELECT balance_after FROM inr_wallet_transactions
+                ORDER BY trade_time DESC LIMIT 1
+            """)
+            row = cursor.fetchone()
+            live_balance = float(row["balance_after"]) if row else 0.0
+            conn.close()
+            return live_balance
+        except Exception as e:
+            print("❌ Sync Error (TEST/DB):", e)
             return None
-        cursor = get_cursor(conn)
-        cursor.execute("""
-            SELECT balance_after FROM inr_wallet_transactions
-            ORDER BY trade_time DESC LIMIT 1
-        """)
-        row = cursor.fetchone()
-        live_balance = float(row["balance_after"]) if row else 0.0
-        conn.close()
-        print(f"✅ INR Wallet synced → ₹{live_balance:.2f}")
+
+    # LIVE mode — fetch directly from CoinDCX
+    balances = _fetch_coindcx_balances()
+    if balances and "INR" in balances:
+        live_balance = balances["INR"]
+        print(f"✅ INR Wallet synced from CoinDCX → ₹{live_balance:.2f}")
         return live_balance
-    except Exception as e:
-        print("❌ Sync Error:", e)
-        return None
+
+    print("❌ sync_inr_wallet: CoinDCX returned no INR balance.")
+    return None
 
 
 def get_last_inr_balance(mode=None):
+    """
+    Returns (balance, timestamp) for INR.
+    LIVE: fetches from CoinDCX API (timestamp = now).
+    TEST: reads last DB record.
+    """
     if mode is None:
         mode = "LIVE" if is_live() else "TEST"
+
+    if mode == "LIVE":
+        balances = _fetch_coindcx_balances()
+        if balances and "INR" in balances:
+            return float(balances["INR"]), float(time.time())
+        return 0.0, None
+
+    # TEST / fallback — DB
     conn = get_mysql_connection()
     if not conn:
         return 0.0, None
@@ -699,7 +719,15 @@ def get_last_inr_balance(mode=None):
 
 
 def get_current_inr_balance():
-    # FIX #4: guard conn=None
+    """
+    Returns current INR balance.
+    LIVE: from CoinDCX API. TEST: from DB.
+    """
+    if is_live():
+        balances = _fetch_coindcx_balances()
+        return float(balances.get("INR", 0.0))
+
+    # TEST mode — DB fallback
     conn = get_mysql_connection()
     if not conn:
         return 0.0
@@ -715,26 +743,48 @@ def get_current_inr_balance():
 
 
 def get_latest_inr_balance():
-    # FIX #4: guard conn=None
+    """
+    Returns latest INR balance.
+    LIVE: from CoinDCX API. TEST: from session state / DB.
+    """
     if not is_live():
         return st.session_state.get("test_inr_balance", 5000.0)
-    conn = get_mysql_connection()
-    if not conn:
-        return 0.0
-    try:
-        c = get_cursor(conn)
-        c.execute("SELECT balance_after FROM inr_wallet_transactions WHERE status='COMPLETED' ORDER BY trade_time DESC LIMIT 1")
-        row = c.fetchone()
-        return float(row['balance_after']) if row and row['balance_after'] is not None else 0.0
-    except Exception:
-        return 0.0
-    finally:
-        conn.close()
+
+    balances = _fetch_coindcx_balances()
+    return float(balances.get("INR", 0.0))
+
+
+def get_btc_wallet_balance() -> float:
+    """
+    Returns current BTC balance directly from CoinDCX API.
+    LIVE: fetches authenticated balance from CoinDCX.
+    TEST: returns session state / DB value.
+    """
+    if not is_live():
+        return st.session_state.get("test_btc_balance", 0.0)
+
+    balances = _fetch_coindcx_balances()
+    btc_balance = float(balances.get("BTC", 0.0))
+    print(f"✅ BTC Wallet balance from CoinDCX → {btc_balance:.8f} BTC")
+    return btc_balance
 
 
 def get_last_wallet_balance(mode=None):
+    """
+    Returns (btc_balance, timestamp).
+    LIVE: fetches BTC balance from CoinDCX API (timestamp = now).
+    TEST: reads from DB wallet_transactions.
+    """
     if mode is None:
         mode = "LIVE" if is_live() else "TEST"
+
+    if mode == "LIVE":
+        balances = _fetch_coindcx_balances()
+        if balances and "BTC" in balances:
+            return float(balances["BTC"]), float(time.time())
+        return 0.0, None
+
+    # TEST / fallback — DB
     conn = get_mysql_connection()
     if not conn:
         return 0.0, None
@@ -885,129 +935,189 @@ def withdraw_inr(amount: float, mode: str = "TEST",
                  method: str = "UPI", acc_no: str = "",
                  ifsc: str = "", upi: str = "",
                  recipient_name: str = "",
-                 max_retries: int = 3, retry_delay: int = 10):
+                 max_retries: int = 3):
     """
-    Handles INR withdrawal via Razorpay Payouts API with retry.
-    Requires Razorpay X (Payouts) enabled on your account.
+    Handles INR withdrawal via Razorpay Payouts API.
 
-    FIX: parameter names changed from (account, upi_id) → (acc_no, upi)
-    to match the call site at the Withdraw button handler.
-    retry_delay reduced from 60s → 10s to avoid blocking Streamlit too long.
+    ⚠️  REQUIRES Razorpay X (Payouts) — separate product from regular Razorpay.
+         Must be activated at: https://razorpay.com/x/
+         Set env var: RAZORPAY_ACCOUNT_NUMBER = your Razorpay X current account number
+
+    FIXES:
+    - Balance reads from get_current_inr_balance() — no trade_mode filter issue
+    - Removed time.sleep() between retries — was freezing Streamlit for 30s
+    - Logs payout_id from Razorpay response for audit trail
+    - Clear error if RAZORPAY_ACCOUNT_NUMBER not configured
     """
+    # ── Check Razorpay X is configured ──────────────────────
+    razorpay_account_number = os.getenv("RAZORPAY_ACCOUNT_NUMBER", "").strip()
+    if mode == "LIVE" and not razorpay_account_number:
+        st.error(
+            "❌ Withdrawal not configured. "
+            "Razorpay Payouts (Razorpay X) requires a current account number. "
+            "Set RAZORPAY_ACCOUNT_NUMBER in your environment variables. "
+            "Activate at: https://razorpay.com/x/"
+        )
+        return
+
     conn = get_mysql_connection()
     if not conn:
         st.error("❌ DB connection failed — withdrawal aborted.")
         return
+
     try:
         cursor = get_cursor(conn)
-        cursor.execute("""
-            SELECT balance_after FROM inr_wallet_transactions
-            WHERE trade_mode = %s ORDER BY trade_time DESC LIMIT 1
-        """, (mode,))
-        row = cursor.fetchone()
-        current_balance = float(row["balance_after"]) if row else 0.0
+
+        # ── Read current balance (no trade_mode filter) ───────
+        current_balance = float(get_current_inr_balance() or 0)
 
         if amount > current_balance:
-            st.error("❌ Insufficient balance for withdrawal")
+            st.error(
+                f"❌ Insufficient balance. "
+                f"Available: ₹{current_balance:,.2f} | Requested: ₹{amount:,.2f}"
+            )
             return
 
         payout_success = False
+        payout_id      = None
         failure_reason = None
 
         if mode == "LIVE":
+            # ── Build Razorpay Payouts payload ────────────────
             rzp_headers = {
-                "Content-Type": "application/json",
-                "X-Payout-Idempotency": str(uuid.uuid4())
+                "Content-Type":        "application/json",
+                "X-Payout-Idempotency": str(uuid.uuid4())   # unique per attempt
             }
+
             if method == "UPI":
                 payout_payload = {
-                    "account_number": os.getenv("RAZORPAY_ACCOUNT_NUMBER", ""),
-                    "amount": int(amount * 100),
-                    "currency": "INR",
-                    "mode": "UPI",
-                    "purpose": "payout",
+                    "account_number":    razorpay_account_number,
+                    "amount":            int(amount * 100),
+                    "currency":          "INR",
+                    "mode":              "UPI",
+                    "purpose":           "payout",
                     "fund_account": {
                         "account_type": "vpa",
-                        "vpa": {"address": upi},          # FIX: was upi_id
+                        "vpa":          {"address": upi},
                         "contact": {
-                            "name": recipient_name,
-                            "type": "customer"
+                            "name":  recipient_name or "Customer",
+                            "type":  "customer"
                         }
                     },
-                    "queue_if_low_balance": True
+                    "queue_if_low_balance": True,
+                    "narration":         "MM AutoTrader Profit Withdrawal"
                 }
             else:
                 payout_payload = {
-                    "account_number": os.getenv("RAZORPAY_ACCOUNT_NUMBER", ""),
-                    "amount": int(amount * 100),
-                    "currency": "INR",
-                    "mode": "IMPS",
-                    "purpose": "payout",
+                    "account_number":    razorpay_account_number,
+                    "amount":            int(amount * 100),
+                    "currency":          "INR",
+                    "mode":              "IMPS",
+                    "purpose":           "payout",
                     "fund_account": {
                         "account_type": "bank_account",
                         "bank_account": {
-                            "name": recipient_name,
-                            "ifsc": ifsc,
-                            "account_number": acc_no     # FIX: was account
+                            "name":           recipient_name or "Customer",
+                            "ifsc":           ifsc,
+                            "account_number": acc_no
                         },
                         "contact": {
-                            "name": recipient_name,
-                            "type": "customer"
+                            "name":  recipient_name or "Customer",
+                            "type":  "customer"
                         }
                     },
-                    "queue_if_low_balance": True
+                    "queue_if_low_balance": True,
+                    "narration":         "MM AutoTrader Profit Withdrawal"
                 }
 
+            # ── Call Razorpay Payouts API (no sleep between retries) ──
             for attempt in range(1, max_retries + 1):
                 try:
-                    res = requests.post(
+                    res  = requests.post(
                         "https://api.razorpay.com/v1/payouts",
                         json=payout_payload,
                         headers=rzp_headers,
-                        auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
+                        auth=HTTPBasicAuth(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
                         timeout=30
                     )
                     data = res.json()
+
                     if data.get("status") in ("queued", "processing", "processed"):
                         payout_success = True
+                        payout_id      = data.get("id", "")
                         break
                     else:
-                        failure_reason = data.get("error", {}).get("description", "Unknown failure")
-                        msg = f"⚠️ Withdraw attempt {attempt} failed: {failure_reason}"
-                        st.warning(msg)
-                        send_telegram(msg)
+                        err            = data.get("error", {})
+                        failure_reason = err.get("description", str(data))
+                        send_telegram(
+                            f"⚠️ Withdraw attempt {attempt}/{max_retries} failed: "
+                            f"{failure_reason}"
+                        )
+                        # No sleep — just retry immediately on next attempt
+
                 except Exception as e:
                     failure_reason = str(e)
-                    msg = f"⚠️ Withdraw attempt {attempt} error: {failure_reason}"
-                    st.warning(msg)
-                    send_telegram(msg)
-
-                if attempt < max_retries:
-                    time.sleep(retry_delay)
+                    send_telegram(
+                        f"⚠️ Withdraw attempt {attempt}/{max_retries} error: {e}"
+                    )
         else:
+            # TEST mode — simulate success
             payout_success = True
+            payout_id      = f"TEST_PAYOUT_{uuid.uuid4().hex[:10]}"
 
+        # ── Log result to DB ──────────────────────────────────
         if payout_success:
             new_balance = current_balance - amount
             cursor.execute("""
                 INSERT INTO inr_wallet_transactions
-                (trade_time, action, amount, balance_after, trade_mode, status)
-                VALUES (NOW(), 'WITHDRAWAL', %s, %s, %s, 'SUCCESS')
-            """, (-amount, new_balance, mode))
-            msg = f"✅ Withdraw ₹{amount:.2f} successful | New balance: ₹{new_balance:.2f}"
+                (trade_time, action, amount, balance_after, trade_mode,
+                 payment_id, status)
+                VALUES (NOW(), %s, %s, %s, %s, %s, 'SUCCESS')
+            """, (
+                f"WITHDRAW-{method}",
+                -amount,
+                new_balance,
+                mode,
+                payout_id or ""
+            ))
+            conn.commit()
+            msg = (
+                f"✅ Withdrawal SUCCESS | "
+                f"₹{amount:,.2f} via {method} | "
+                f"Balance: ₹{new_balance:,.2f} | "
+                f"ID: {payout_id}"
+            )
             st.success(msg)
             send_telegram(msg)
         else:
+            # Log failed attempt — balance unchanged
             cursor.execute("""
                 INSERT INTO inr_wallet_transactions
-                (trade_time, action, amount, balance_after, trade_mode, status)
-                VALUES (NOW(), 'WITHDRAWAL', %s, %s, %s, 'FAILED')
-            """, (-amount, current_balance, mode))
-            msg = f"❌ Withdraw ₹{amount:.2f} failed after {max_retries} attempts: {failure_reason}"
+                (trade_time, action, amount, balance_after, trade_mode,
+                 payment_id, status)
+                VALUES (NOW(), %s, %s, %s, %s, %s, 'FAILED')
+            """, (
+                f"WITHDRAW-{method}",
+                -amount,
+                current_balance,
+                mode,
+                ""
+            ))
+            conn.commit()
+            msg = (
+                f"❌ Withdrawal FAILED after {max_retries} attempts | "
+                f"₹{amount:,.2f} | Reason: {failure_reason}"
+            )
             st.error(msg)
             send_telegram(msg)
 
-        conn.commit()
+    except Exception as e:
+        st.error(f"❌ Withdrawal error: {e}")
+        send_telegram(f"❌ Withdrawal error: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     finally:
         conn.close()
 
@@ -1155,6 +1265,37 @@ def create_razorpay_payment(amount_inr: float, description: str = None):
         "currency": order["currency"],
         "mode":     "TEST" if "test" in RAZORPAY_KEY_ID.lower() else "LIVE"
     }
+
+
+def create_razorpay_payment_link(amount_inr: float, description: str = None):
+    """
+    Creates a Razorpay Payment Link — returns a real URL that can be
+    opened in any browser or encoded into a QR code.
+    The short_url from Razorpay works with all UPI apps when QR-scanned.
+    """
+    try:
+        link = razorpay_client.payment_link.create({
+            "amount":      int(float(amount_inr) * 100),
+            "currency":    "INR",
+            "description": description or "MM AutoTrader Wallet Deposit",
+            "upi_link":    True,     # generates a UPI-compatible payment link
+            "notify": {
+                "sms":   False,
+                "email": False
+            },
+            "reminder_enable": False,
+            "callback_url":    "",
+            "callback_method": "get"
+        })
+        return {
+            "payment_link_id": link["id"],
+            "short_url":       link["short_url"],   # THIS is what goes in the QR
+            "amount":          link["amount"],
+            "mode":            "TEST" if "test" in RAZORPAY_KEY_ID.lower() else "LIVE"
+        }
+    except Exception as e:
+        print(f"❌ create_razorpay_payment_link error: {e}")
+        return None
 
 
 def make_order_id(prefix="ORDER"):
@@ -1874,12 +2015,108 @@ def update_wallet_history_profit(profit, trade_date=None):
 # ─────────────────────────────────────────
 # Auto-Trade Start / Stop
 # ─────────────────────────────────────────
+def check_minimum_balance_to_trade(inr_balance: float, btc_balance: float, price_inr: float):
+    """
+    Validates whether wallet has enough funds to place at least one order.
+    Returns (ok: bool, message: str).
+    BTC state  -> needs >= COINDCX_MIN_BTC_QTY BTC to sell.
+    INR state  -> needs enough INR to buy COINDCX_MIN_BTC_QTY with 5% headroom.
+    Both zero  -> blocked.
+    """
+    # Min INR needed = cost of 0.0001 BTC + 5% headroom for price movement + 1.354% total charges
+    min_inr_needed = round(COINDCX_MIN_BTC_QTY * price_inr * 1.065, 2) if price_inr else 2000.0
+    # Recommended comfortable amount (3x minimum for a few trade cycles)
+    recommended_inr = round(min_inr_needed * 3, 2)
+
+    if btc_balance >= COINDCX_MIN_BTC_QTY:
+        btc_inr_value = round(btc_balance * price_inr, 2) if price_inr else 0
+        return True, (
+            f"BTC balance OK: {btc_balance:.6f} BTC "
+            f"(≈ ₹{btc_inr_value:,.2f}) — bot will SELL when target is hit."
+        )
+
+    if inr_balance >= min_inr_needed:
+        est_btc = round(inr_balance / price_inr, 6) if price_inr else 0
+        return True, (
+            f"INR balance OK: ₹{inr_balance:,.2f} "
+            f"(can buy ≈ {est_btc:.6f} BTC) — bot will BUY when target is hit."
+        )
+
+    if inr_balance == 0 and btc_balance == 0:
+        return False, (
+            f"Both INR and BTC balances are zero. "
+            f"Deposit at least ₹{min_inr_needed:,.2f} to your CoinDCX INR wallet to start."
+        )
+
+    shortfall = round(min_inr_needed - inr_balance, 2)
+    return False, (
+        f"Insufficient balance. "
+        f"You have ₹{inr_balance:,.2f} but need ₹{min_inr_needed:,.2f} "
+        f"(shortfall: ₹{shortfall:,.2f}). "
+        f"Recommended deposit: ₹{recommended_inr:,.2f} for comfortable trading."
+    )
+
+
+def get_balance_preflight_info(price_inr: float) -> dict:
+    """
+    Fetches live balances from CoinDCX and returns a full preflight
+    status dict used by the UI balance panel before starting autotrade.
+    """
+    inr_balance = get_current_inr_balance()
+    btc_balance = get_btc_wallet_balance()
+    price_inr   = price_inr or 0.0
+
+    min_inr_needed  = round(COINDCX_MIN_BTC_QTY * price_inr * 1.052, 2) if price_inr else 2000.0
+    recommended_inr = round(min_inr_needed * 3, 2)
+    est_btc_can_buy = round(inr_balance / price_inr, 6) if price_inr and inr_balance else 0.0
+    btc_inr_value   = round(btc_balance * price_inr, 2) if price_inr else 0.0
+    shortfall       = max(0.0, round(min_inr_needed - inr_balance, 2))
+    fee_cost        = round(min_inr_needed * 0.01354, 2)  # 1.354% total (0.3% taker + 0.054% GST + 1% TDS)
+    min_profit_inr  = round(min_inr_needed * 0.015, 2)        # 1.5% target (breakeven 1.354% + 0.15% net)
+
+    ok, msg = check_minimum_balance_to_trade(inr_balance, btc_balance, price_inr)
+
+    # Determine state
+    if btc_balance >= COINDCX_MIN_BTC_QTY:
+        state = "BTC"
+    elif inr_balance >= min_inr_needed:
+        state = "INR"
+    elif inr_balance == 0 and btc_balance == 0:
+        state = "EMPTY"
+    else:
+        state = "LOW"
+
+    return {
+        "ok":               ok,
+        "message":          msg,
+        "state":            state,
+        "inr_balance":      inr_balance,
+        "btc_balance":      btc_balance,
+        "btc_inr_value":    btc_inr_value,
+        "min_inr_needed":   min_inr_needed,
+        "recommended_inr":  recommended_inr,
+        "shortfall":        shortfall,
+        "est_btc_can_buy":  est_btc_can_buy,
+        "fee_cost":         fee_cost,
+        "min_profit_inr":   min_profit_inr,
+        "price_inr":        price_inr,
+    }
+
+
 def start_autotrade():
     try:
         btc_balance, _ = get_last_wallet_balance(mode="LIVE" if is_live() else "TEST")
         inr_balance, _ = get_last_inr_balance(mode="LIVE"   if is_live() else "TEST")
         btc_balance = float(btc_balance or 0.0)
         inr_balance = float(inr_balance or 0.0)
+
+        # ── Minimum balance check before activating ──────────────
+        current_price = get_market_price("BTCINR") or 0.0
+        ok, balance_msg = check_minimum_balance_to_trade(inr_balance, btc_balance, current_price)
+        if not ok:
+            st.error(f"❌ {balance_msg}")
+            send_telegram(f"Auto-Trade blocked: {balance_msg}")
+            return
 
         st.session_state["BTC_WALLET"] = {"balance": btc_balance}
         st.session_state["INR_WALLET"] = {"balance": inr_balance}
@@ -1892,9 +2129,10 @@ def start_autotrade():
         log_wallet_transaction("AUTO_START", 0, btc_balance, 0, "AUTO_TRADE_START")
         log_inr_transaction("AUTO_START", 0, inr_balance, "LIVE" if is_live() else "TEST")
 
-        msg = f"🚀 Auto-Trade ACTIVATED | INR ₹{inr_balance:,.2f} | ₿{btc_balance:.6f}"
-        st.success(msg)
-        send_telegram(msg)
+        msg = f"Auto-Trade ACTIVATED | INR Rs.{inr_balance:,.2f} | BTC {btc_balance:.6f}"
+        st.success(f"🚀 {msg}")
+        st.info(f"✅ {balance_msg}")
+        send_telegram(f"🚀 {msg}")
     except Exception as e:
         st.error(f"❌ Failed to start Auto-Trade: {e}")
         send_telegram(f"❌ Failed to start: {e}")
@@ -2156,7 +2394,7 @@ def check_auto_trading(price_inr: float):
 
         # ── Settings ─────────────────────────────────────────────
         stop_loss_pct = float(st.session_state.get("cfg_stop_loss", DEFAULT_STOP_LOSS_PCT))
-        target_pct    = float(st.session_state.get("cfg_target_pct", 0.3))   # % move to trigger sell/buy
+        target_pct    = float(st.session_state.get("cfg_target_pct", 1.5))   # % move to trigger sell/buy (min 1.5% after TDS+GST+fees)
 
         # ── Last auto trade from DB ──────────────────────────────
         last_auto      = get_last_auto_trade()
@@ -2174,23 +2412,26 @@ def check_auto_trading(price_inr: float):
                 return  # silent during cooldown
 
         # ── Cycle status → Telegram ──────────────────────────────
-        # Only sends when price moves ≥ ₹1000 OR state changes (BTC↔INR).
-        # Prevents the same message repeating on every 60s page refresh.
-        _last_tg_price = st.session_state.get("_last_tg_price", 0)
+        # Sends ONLY when:
+        #   1. Trade state changes (BTC↔INR) — always
+        #   2. Every 2 hours as a heartbeat (not on every price move)
         _last_tg_state = st.session_state.get("_last_tg_state", "")
+        _last_tg_time  = st.session_state.get("_last_tg_time", 0)
         _cur_state     = f"{'BTC' if btc_balance > 0 else 'INR'}_{entry_price}"
-        _price_moved   = abs(price_inr - _last_tg_price) >= 1000
         _state_changed = _cur_state != _last_tg_state
+        _two_hours_passed = (time.time() - _last_tg_time) >= 7200  # 2 hours
 
-        if _price_moved or _state_changed:
-            st.session_state["_last_tg_price"] = price_inr
+        if _state_changed or _two_hours_passed:
             st.session_state["_last_tg_state"] = _cur_state
+            st.session_state["_last_tg_time"]  = time.time()
 
             if btc_balance > 0 and entry_price > 0:
                 profit_now = (price_inr - entry_price) * btc_balance
                 sell_at    = round(entry_price * (1 + target_pct / 100), 2)
                 sl_at      = round(entry_price * (1 - stop_loss_pct / 100), 2)
+                tag        = "🔔 State Update" if _state_changed else "⏰ 2h Heartbeat"
                 send_telegram(
+                    f"{tag}\n"
                     f"🔄 Holding {btc_balance:.6f} BTC\n"
                     f"  Bought @ ₹{entry_price:,.2f} | Now ₹{price_inr:,.2f}\n"
                     f"  P&L: ₹{profit_now:+.2f} | Sell at ₹{sell_at:,.2f} (+{target_pct:.2f}%)\n"
@@ -2198,7 +2439,9 @@ def check_auto_trading(price_inr: float):
                 )
             elif inr_balance >= min_trade_inr and last_type == "AUTO_SELL" and last_inr_value > 0:
                 buy_at = round(last_inr_value * (1 - target_pct / 100), 2)
+                tag    = "🔔 State Update" if _state_changed else "⏰ 2h Heartbeat"
                 send_telegram(
+                    f"{tag}\n"
                     f"🔄 Holding ₹{inr_balance:,.2f} INR\n"
                     f"  Last sell @ ₹{last_inr_value:,.2f} | Now ₹{price_inr:,.2f}\n"
                     f"  Buy when price ≤ ₹{buy_at:,.2f} (-{target_pct:.2f}%)"
@@ -2331,6 +2574,7 @@ def check_auto_trading(price_inr: float):
             avg_price  = order["avg_price"]
             fee_btc    = order["fee"]
             new_btc    = btc_bought
+            new_btc       = btc_bought
             fresh_inr_pre = float(get_current_inr_balance() or 0)
             new_inr       = max(0.0, fresh_inr_pre - buy_inr)
             save_entry_price(avg_price)
@@ -2339,6 +2583,7 @@ def check_auto_trading(price_inr: float):
             log_inr_transaction("AUTO_BUY", -buy_inr, new_inr, mode)
             save_trade_log("AUTO_BUY", btc_bought, new_btc, avg_price)
 
+            st.session_state["BTC_WALLET"] = {"balance": new_btc}
             st.session_state["BTC_WALLET"] = {"balance": new_btc}
             st.session_state["INR_WALLET"] = {"balance": new_inr}
             BTC_WALLET["balance"]           = new_btc
@@ -2484,19 +2729,11 @@ if price:
 if price_inr:
     check_auto_trading(price_inr)
 
-# ── Deposit ──
-deposit_amt = st.number_input("Deposit ₹", min_value=10, step=10, value=500)
+# ── Deposit via QR Code ──────────────────────────────────────
+# Razorpay popup button removed — QR only for cleaner UX
+# QR encodes a real Razorpay Payment Link URL (not a UPI deep-link)
+# so it works with PhonePe, GPay, Paytm, BHIM and all UPI apps
 
-if "deposit_in_progress" not in st.session_state:
-    st.session_state["deposit_in_progress"] = False
-if "deposit_order_id" not in st.session_state:
-    st.session_state["deposit_order_id"] = None
-if "deposit_order_amount" not in st.session_state:
-    st.session_state["deposit_order_amount"] = None
-if "deposit_started_at" not in st.session_state:
-    st.session_state["deposit_started_at"] = 0
-
-    
 if "qr_payment_open" not in st.session_state:
     st.session_state["qr_payment_open"] = False
 if "qr_order_id" not in st.session_state:
@@ -2505,228 +2742,115 @@ if "qr_order_amount" not in st.session_state:
     st.session_state["qr_order_amount"] = None
 if "qr_started_at" not in st.session_state:
     st.session_state["qr_started_at"] = 0
+if "qr_short_url" not in st.session_state:
+    st.session_state["qr_short_url"] = None
 
-if st.session_state["deposit_in_progress"]:
-    elapsed = time.time() - st.session_state.get("deposit_started_at", 0)
-    if elapsed > 600:
-        st.session_state["deposit_in_progress"] = False
-        st.session_state["deposit_order_id"]    = None
-        st.session_state["deposit_order_amount"] = None
-
-if st.session_state["deposit_in_progress"]:
-    # ── Auto-refresh is SUPPRESSED during payment ────────────────
-    st.session_state["suppress_autorefresh"] = True
-
-    order_id = st.session_state["deposit_order_id"]
-    amt_inr  = round(st.session_state["deposit_order_amount"] / 100, 2)
-    elapsed  = int(time.time() - st.session_state["deposit_started_at"])
-    remaining = max(0, 600 - elapsed)
-
-    st.warning(
-        f"⏳ **Payment in progress — ₹{amt_inr:.2f}** | order `{order_id}`\n\n"
-        f"🚫 **Auto-refresh is paused.** Complete the payment in the Razorpay popup.\n\n"
-        f"⏱ Session expires in **{remaining // 60}m {remaining % 60}s** if not completed.",
-        icon="💳"
-    )
-
-    st.components.v1.html(f"""
-    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-    <script>
-    var options = {{
-        "key": "{RAZORPAY_KEY_ID}",
-        "amount": "{st.session_state['deposit_order_amount']}",
-        "currency": "INR",
-        "name": "MM AutoTrader",
-        "description": "Wallet Deposit",
-        "order_id": "{order_id}",
-        "modal": {{
-            "ondismiss": function() {{
-                // User closed the modal WITHOUT paying — do NOT reload.
-                // Just notify the parent so it can show a message.
-                window.parent.postMessage({{type: "deposit_dismissed"}}, "*");
-            }}
-        }},
-        "handler": function (response) {{
-            // Payment SUCCESS — safe to reload now so webhook credit appears.
-            window.parent.postMessage({{type: "deposit_success", data: response}}, "*");
-            setTimeout(function() {{ window.location.reload(); }}, 2000);
-        }}
-    }};
-    var rzp = new Razorpay(options);
-    rzp.open();
-
-    // Listen for dismiss — show a message but do NOT auto-reload
-    window.addEventListener("message", function(e) {{
-        if (e.data && e.data.type === "deposit_dismissed") {{
-            // Do nothing here — user will use the Cancel button below
-        }}
-    }});
-    </script>
-    """, height=10)
-
-    col_cancel, col_paid = st.columns(2)
-    with col_cancel:
-        if st.button("❌ Cancel Payment"):
-            st.session_state["deposit_in_progress"]  = False
-            st.session_state["deposit_order_id"]     = None
-            st.session_state["deposit_order_amount"] = None
-            st.session_state["suppress_autorefresh"] = False
-            st.info("Payment cancelled. Auto-refresh resumed.")
-            st.rerun()
-    with col_paid:
-        if st.button("✅ I Already Paid"):
-            st.session_state["deposit_in_progress"]  = False
-            st.session_state["deposit_order_id"]     = None
-            st.session_state["deposit_order_amount"] = None
-            st.session_state["suppress_autorefresh"] = False
-            st.success(
-                "✅ If your payment went through, your wallet will be credited "
-                "by the webhook within 30 seconds. Refreshing now..."
-            )
-            st.rerun()
-
-    # Hard timeout — 10 minutes, reset silently
-    if elapsed > 600:
-        st.session_state["deposit_in_progress"]  = False
-        st.session_state["deposit_order_id"]     = None
-        st.session_state["deposit_order_amount"] = None
-        st.session_state["suppress_autorefresh"] = False
-        st.warning("⚠️ Payment session expired (10 min). Please try again.")
-        st.rerun()
-
-else:
-    # ── No payment in progress — auto-refresh is allowed ────────
-    st.session_state["suppress_autorefresh"] = False
-
-    if st.button("💳 Pay with Razorpay"):
-        if not action_lock("DEPOSIT_LOCK", 5):
-            st.warning("⏳ Please wait a moment before trying again.")
-        else:
-            order = create_razorpay_payment(deposit_amt, description=f"INR Wallet Deposit ₹{deposit_amt}")
-
-            st.session_state["deposit_in_progress"]  = True
-            st.session_state["deposit_order_id"]     = order["order_id"]
-            st.session_state["deposit_order_amount"] = order["amount"]
-            st.session_state["deposit_started_at"]   = time.time()
-            st.session_state["suppress_autorefresh"] = True
-
-            st.components.v1.html(f"""
-            <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-            <script>
-            var options = {{
-                "key": "{RAZORPAY_KEY_ID}",
-                "amount": "{order['amount']}",
-                "currency": "INR",
-                "name": "MM AutoTrader",
-                "description": "Wallet Deposit",
-                "order_id": "{order['order_id']}",
-                "prefill": {{}},
-                "modal": {{
-                    "ondismiss": function() {{
-                        // Dismissed without paying — do NOT reload
-                        window.parent.postMessage({{type: "deposit_dismissed"}}, "*");
-                    }}
-                }},
-                "handler": function (response) {{
-                    // Payment SUCCESS — reload to show updated balance
-                    window.parent.postMessage({{type: "deposit_success", data: response}}, "*");
-                    setTimeout(function() {{ window.location.reload(); }}, 2000);
-                }}
-            }};
-            var rzp = new Razorpay(options);
-            rzp.open();
-            </script>
-            """, height=10)
-
-            st.info(
-                f"⏳ Razorpay checkout opened for ₹{deposit_amt} | order `{order['order_id']}`. "
-                f"Complete your payment in the popup. "
-                f"**Auto-refresh is paused until you finish or cancel.**"
-            )
-
-# ── QR Code Payment ─────────────────────────────────────────
-st.markdown("---")
-st.subheader("📲 Pay via QR Code")
-st.caption("Use this if you prefer scanning a QR code instead of the Razorpay popup.")
-
+# ── QR Payment Active ────────────────────────────────────────
 if st.session_state["qr_payment_open"]:
-    # ── QR payment is active — suppress auto-refresh ──────────
     st.session_state["suppress_autorefresh"] = True
 
     qr_order_id  = st.session_state["qr_order_id"]
     qr_amt_inr   = round(st.session_state["qr_order_amount"] / 100, 2)
+    qr_short_url = st.session_state.get("qr_short_url", "")
     qr_elapsed   = int(time.time() - st.session_state["qr_started_at"])
     qr_remaining = max(0, 600 - qr_elapsed)
 
-    st.warning(
-        f"📲 QR Payment in progress — ₹{qr_amt_inr:.2f} | order {qr_order_id} | "
-        f"Auto-refresh paused. Scan QR and complete payment. "
-        f"Expires in {qr_remaining // 60}m {qr_remaining % 60}s",
-        icon="💳"
-    )
-
-    # Generate QR from Razorpay payment URL
-    qr_payment_url = f"upi://pay?pa={RAZORPAY_KEY_ID}&pn=MMAutoTrader&am={qr_amt_inr}&cu=INR&tn={qr_order_id}"
-    qr_bytes = generate_qr_code(qr_payment_url)
-    st.image(qr_bytes, caption=f"Scan to pay ₹{qr_amt_inr:.2f}", width=220)
-    st.code(qr_order_id, language="text")
-
-    qr_col1, qr_col2 = st.columns(2)
-
-    with qr_col1:
-        if st.button("❌ Cancel QR Payment"):
-            st.session_state["qr_payment_open"]   = False
-            st.session_state["qr_order_id"]        = None
-            st.session_state["qr_order_amount"]    = None
-            st.session_state["suppress_autorefresh"] = False
-            st.info("QR payment cancelled. Auto-refresh resumed.")
-            st.rerun()
-
-    with qr_col2:
-        if st.button("✅ Payment Done"):
-            st.session_state["qr_payment_open"]   = False
-            st.session_state["qr_order_id"]        = None
-            st.session_state["qr_order_amount"]    = None
-            st.session_state["suppress_autorefresh"] = False
-            st.success(
-                "✅ Payment confirmed! Your wallet will be credited by the "
-                "webhook within 30 seconds. Refreshing now..."
-            )
-            st.rerun()
-
     # Hard timeout — 10 minutes
     if qr_elapsed > 600:
-        st.session_state["qr_payment_open"]    = False
-        st.session_state["qr_order_id"]         = None
-        st.session_state["qr_order_amount"]     = None
-        st.session_state["suppress_autorefresh"] = False
+        st.session_state["qr_payment_open"]      = False
+        st.session_state["qr_order_id"]           = None
+        st.session_state["qr_order_amount"]       = None
+        st.session_state["qr_short_url"]          = None
+        st.session_state["suppress_autorefresh"]  = False
         st.warning("⚠️ QR payment session expired (10 min). Please try again.")
         st.rerun()
+    else:
+        st.subheader("📲 Scan to Pay")
+        st.warning(
+            f"Auto-refresh paused | ₹{qr_amt_inr:.2f} | "
+            f"Expires in {qr_remaining // 60}m {qr_remaining % 60}s",
+            icon="💳"
+        )
+
+        # QR encodes the real Razorpay Payment Link short_url
+        # This works with ALL UPI apps (PhonePe, GPay, Paytm, BHIM)
+        if qr_short_url:
+            qr_bytes = generate_qr_code(qr_short_url)
+            st.image(qr_bytes, caption=f"Scan to pay ₹{qr_amt_inr:.2f}", width=240)
+            st.caption(f"Or open link: [{qr_short_url}]({qr_short_url})")
+        else:
+            st.error("❌ Payment link not available. Please cancel and try again.")
+
+        qr_col1, qr_col2 = st.columns(2)
+        with qr_col1:
+            if st.button("❌ Cancel Payment"):
+                st.session_state["qr_payment_open"]     = False
+                st.session_state["qr_order_id"]          = None
+                st.session_state["qr_order_amount"]      = None
+                st.session_state["qr_short_url"]         = None
+                st.session_state["suppress_autorefresh"] = False
+                st.info("Payment cancelled. Auto-refresh resumed.")
+                st.rerun()
+
+        with qr_col2:
+            if st.button("✅ Payment Done"):
+                st.session_state["qr_payment_open"]     = False
+                st.session_state["qr_order_id"]          = None
+                st.session_state["qr_order_amount"]      = None
+                st.session_state["qr_short_url"]         = None
+                st.session_state["suppress_autorefresh"] = False
+                st.success(
+                    "✅ Payment confirmed! Wallet will be credited by "
+                    "webhook within 30 seconds."
+                )
+                st.rerun()
 
 else:
-    # ── Show QR payment button ────────────────────────────────
-    qr_deposit_amt = st.number_input(
-        "Amount ₹ (QR)", min_value=10, step=10, value=500,
-        key="qr_deposit_input"
+    # ── Show Deposit Section ──────────────────────────────────
+    st.session_state["suppress_autorefresh"] = False
+    st.subheader("💰 Deposit via UPI / QR")
+
+    deposit_amt = st.number_input(
+        "Deposit Amount (₹)", min_value=100, step=100, value=500
     )
 
     if st.button("📲 Generate Payment QR"):
         if not action_lock("QR_DEPOSIT_LOCK", 5):
             st.warning("⏳ Please wait a moment before trying again.")
         else:
-            order = create_razorpay_payment(
-                qr_deposit_amt,
-                description=f"INR Wallet QR Deposit ₹{qr_deposit_amt}"
-            )
-            st.session_state["qr_payment_open"]    = True
-            st.session_state["qr_order_id"]         = order["order_id"]
-            st.session_state["qr_order_amount"]     = order["amount"]
-            st.session_state["qr_started_at"]       = time.time()
-            st.session_state["suppress_autorefresh"] = True
-            st.rerun()
+            with st.spinner("Creating payment link..."):
+                link = create_razorpay_payment_link(
+                    deposit_amt,
+                    description=f"MM AutoTrader Wallet Deposit ₹{deposit_amt}"
+                )
+
+            if not link:
+                st.error(
+                    "❌ Could not create payment link. "
+                    "Check your Razorpay API keys and try again."
+                )
+            else:
+                st.session_state["qr_payment_open"]  = True
+                st.session_state["qr_order_id"]       = link["payment_link_id"]
+                st.session_state["qr_order_amount"]   = link["amount"]
+                st.session_state["qr_short_url"]      = link["short_url"]
+                st.session_state["qr_started_at"]     = time.time()
+                st.session_state["suppress_autorefresh"] = True
+                st.rerun()
 
 # ── Withdraw ──
 st.subheader("🏧 Withdraw to Bank / UPI")
+
+# ── Razorpay X configuration check ───────────────────────────
+if is_live() and not os.getenv("RAZORPAY_ACCOUNT_NUMBER", "").strip():
+    st.warning(
+        "⚠️ **Withdrawal requires Razorpay X (Payouts)** — not yet configured. "
+        "Activate at [razorpay.com/x](https://razorpay.com/x/) and set "
+        "`RAZORPAY_ACCOUNT_NUMBER` in your Render environment variables. "
+        "In TEST mode, withdrawals are simulated without this.",
+        icon="🏦"
+    )
+
 recipients      = get_all_recipients()
 recipient_names = [f"{r['name']} ({r['method']})" for r in recipients]
 selected        = st.selectbox("📋 Saved Recipient", ["-- New Recipient --"] + recipient_names)
@@ -3047,23 +3171,29 @@ with st.expander("⚙️ Auto-Trade Settings", expanded=False):
     sl_col1, sl_col2 = st.columns(2)
     with sl_col1:
         cfg_target_pct = st.number_input(
-            "🎯 Profit Target (%)", min_value=0.1, max_value=5.0, step=0.05,
-            value=float(st.session_state.get("cfg_target_pct", 0.3)),
+            "🎯 Profit Target (%)", min_value=0.1, max_value=10.0, step=0.05,
+            value=float(st.session_state.get("cfg_target_pct", 1.5)),
             help=(
                 "Sell when BTC price rises X% above your buy price. "
                 "Rebuy when price dips X% below last sell price. "
-                "0.3% recommended — covers 0.2% round-trip fee + leaves ~0.1% net profit. "
-                "Example at ₹78,00,000: sell at ₹78,23,400 → rebuy at ₹78,00,002."
+                "⚠️ Minimum 1.45% to break even after all Indian charges: "
+                "CoinDCX taker 0.15%×2 + 18% GST on fees + 1% TDS on sell = 1.354% total cost. "
+                "1.5% recommended for ~0.15% net profit per cycle."
             )
         )
         st.session_state["cfg_target_pct"] = cfg_target_pct
-        # Show break-even info
+        # Show real break-even info with all charges
         if price_inr:
-            fee_pct      = 0.2   # 0.1% buy + 0.1% sell
-            net_profit   = cfg_target_pct - fee_pct
+            taker_fee_pct = 0.30    # 0.15% buy + 0.15% sell
+            gst_pct       = round(taker_fee_pct * 0.18, 4)   # 18% GST on taker fees
+            tds_pct       = 1.0     # 1% TDS on sell
+            total_cost    = round(taker_fee_pct + gst_pct + tds_pct, 4)
+            net_profit    = round(cfg_target_pct - total_cost, 4)
             st.caption(
-                f"Fee cost: ~{fee_pct:.1f}% | Net profit per cycle: ~{net_profit:.2f}% "
-                f"{'✅ Profitable' if net_profit > 0 else '❌ Below break-even — increase target'}"
+                f"Taker fees: 0.30% | GST on fees: {gst_pct:.3f}% | TDS: 1.00% | "
+                f"Total cost: {total_cost:.3f}% | "
+                f"Net profit/cycle: ~{net_profit:.3f}% "
+                f"{'✅ Profitable' if net_profit > 0 else '❌ Below break-even — increase target above 1.45%'}"
             )
 
     with sl_col2:
@@ -3091,7 +3221,8 @@ with st.expander("⚙️ Auto-Trade Settings", expanded=False):
         tgt_price_now      = round(entry_now * (1 + cfg_target_pct_now / 100), 2)
         profit_now_inr     = (price_inr - entry_now) * btc_bal_now if btc_bal_now > 0 else 0
         profit_at_target   = (tgt_price_now - entry_now) * btc_bal_now if btc_bal_now > 0 else 0
-        fee_cost_inr       = entry_now * btc_bal_now * 0.002 if btc_bal_now > 0 else 0
+        # Real charges: 0.15%×2 taker + 18% GST on fees + 1% TDS on sell = 1.354%
+        fee_cost_inr       = entry_now * btc_bal_now * 0.01354 if btc_bal_now > 0 else 0
         net_at_target      = profit_at_target - fee_cost_inr
 
         st.markdown("---")
@@ -3111,6 +3242,76 @@ with st.expander("⚙️ Auto-Trade Settings", expanded=False):
 
 # ── Auto-Trade Button ──
 autotrade_active = get_autotrade_active_from_db()
+
+# ── Pre-flight Balance Panel (shown before user clicks Start) ──
+if not autotrade_active and price_inr:
+    pf = get_balance_preflight_info(price_inr)
+
+    st.markdown("#### 💳 Wallet Balance Check")
+    col_inr, col_btc = st.columns(2)
+    col_inr.metric(
+        "INR Balance (CoinDCX)",
+        f"₹{pf['inr_balance']:,.2f}",
+        delta=None if pf['state'] in ("EMPTY","LOW") else "✅ Sufficient"
+    )
+    col_btc.metric(
+        "BTC Balance (CoinDCX)",
+        f"{pf['btc_balance']:.6f} BTC",
+        delta=f"≈ ₹{pf['btc_inr_value']:,.2f}" if pf['btc_balance'] > 0 else None
+    )
+
+    if pf["state"] == "BTC":
+        st.success(
+            f"✅ **Ready to trade** — You have {pf['btc_balance']:.6f} BTC "
+            f"(≈ ₹{pf['btc_inr_value']:,.2f}). "
+            f"Bot will **SELL** when price hits target."
+        )
+
+    elif pf["state"] == "INR":
+        st.success(
+            f"✅ **Ready to trade** — ₹{pf['inr_balance']:,.2f} available. "
+            f"Bot will **BUY** ≈ {pf['est_btc_can_buy']:.6f} BTC when price dips to target."
+        )
+        with st.expander("📊 Trade estimate at current price"):
+            taker_fee    = round(pf['min_inr_needed'] * 0.003, 2)
+            gst_on_fee   = round(taker_fee * 0.18, 2)
+            tds_charge   = round(pf['min_inr_needed'] * 0.01, 2)
+            st.markdown(f"""
+| Detail | Value |
+|---|---|
+| Current BTC Price | ₹{pf['price_inr']:,.2f} |
+| Min BTC qty (CoinDCX) | {COINDCX_MIN_BTC_QTY} BTC |
+| Min INR needed | ₹{pf['min_inr_needed']:,.2f} |
+| Your INR balance | ₹{pf['inr_balance']:,.2f} |
+| Est. BTC you can buy | {pf['est_btc_can_buy']:.6f} BTC |
+| Taker fee (0.15%×2) | ₹{taker_fee:,.2f} |
+| GST on fees (18%) | ₹{gst_on_fee:,.2f} |
+| TDS on sell (1%) | ₹{tds_charge:,.2f} |
+| **Total charges** | **₹{pf['fee_cost']:,.2f} (1.354%)** |
+| Min profit per cycle (1.5%) | ₹{pf['min_profit_inr']:,.2f} |
+            """)
+
+    elif pf["state"] == "EMPTY":
+        st.error("❌ **No funds detected on CoinDCX.** Deposit INR to your CoinDCX wallet first.")
+        st.info(
+            f"💡 Minimum deposit needed: **₹{pf['min_inr_needed']:,.2f}**  |  "
+            f"Recommended: **₹{pf['recommended_inr']:,.2f}**"
+        )
+
+    else:  # LOW
+        st.warning(
+            f"⚠️ **Balance too low to trade.**  "
+            f"You have ₹{pf['inr_balance']:,.2f} but need ₹{pf['min_inr_needed']:,.2f}."
+        )
+        st.info(
+            f"💡 Top up **₹{pf['shortfall']:,.2f}** more to your CoinDCX INR wallet.  "
+            f"Recommended total: **₹{pf['recommended_inr']:,.2f}** for smooth trading."
+        )
+        st.progress(
+            min(pf['inr_balance'] / pf['min_inr_needed'], 1.0),
+            text=f"₹{pf['inr_balance']:,.2f} / ₹{pf['min_inr_needed']:,.2f} minimum"
+        )
+
 if st.button(f"{'🚀 Start' if not autotrade_active else '🛑 Stop'} Auto-Trade"):
     if autotrade_active:
         # FIX #7: Use stop_autotrade() so wallet state sync runs correctly
