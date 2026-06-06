@@ -1673,15 +1673,29 @@ def place_market_buy(buy_inr: float) -> dict:
     if not spot_price:
         raise RuntimeError("Cannot fetch BTCINR price — aborting BUY to protect funds.")
 
-    # CoinDCX requires total_quantity in BTC, rounded to max 6 decimal places
-    btc_qty = float(f"{buy_inr / spot_price:.6f}")
+    # Always fetch LIVE INR balance fresh from CoinDCX just before placing order
+    # This prevents "Insufficient funds" from stale balance being passed in
+    live_inr = get_current_inr_balance()
+    if live_inr <= 0:
+        raise ValueError(f"INR balance is ₹{live_inr:.2f} — nothing to buy with.")
 
-    # FIX #11: CoinDCX minimum order size check
+    # Use 98% of live INR balance — keeps 2% buffer for taker fee (0.15%) + rounding
+    usable_inr = live_inr * 0.98
+    if usable_inr < (COINDCX_MIN_BTC_QTY * spot_price):
+        raise ValueError(
+            f"INR balance ₹{live_inr:.2f} is too low. "
+            f"Need at least ₹{COINDCX_MIN_BTC_QTY * spot_price:.2f} to buy "
+            f"minimum {COINDCX_MIN_BTC_QTY} BTC."
+        )
+
+    # CoinDCX requires total_quantity in BTC, max 6 decimal places
+    btc_qty = float(f"{usable_inr / spot_price:.6f}")
+
     if btc_qty < COINDCX_MIN_BTC_QTY:
         raise ValueError(
             f"Calculated BTC qty {btc_qty:.6f} is below CoinDCX minimum "
-            f"{COINDCX_MIN_BTC_QTY}. Increase buy_inr (need at least "
-            f"₹{COINDCX_MIN_BTC_QTY * spot_price:.2f})."
+            f"{COINDCX_MIN_BTC_QTY}. Live INR: ₹{live_inr:.2f}, "
+            f"need at least ₹{COINDCX_MIN_BTC_QTY * spot_price:.2f}."
         )
 
     order_resp = _coindcx_signed_request(
@@ -1706,6 +1720,13 @@ def place_market_buy(buy_inr: float) -> dict:
         """, (order_id, btc_qty, spot_price))
         conn.commit()
         conn.close()
+
+    send_telegram(
+        f"📤 BUY order placed\n"
+        f"  {btc_qty:.6f} BTC @ ₹{spot_price:,.2f}\n"
+        f"  INR used: ₹{usable_inr:,.2f} (of ₹{live_inr:,.2f} balance)\n"
+        f"  Order ID: {order_id}"
+    )
 
     final      = _poll_order_status(order_id)
     filled_qty = float(final.get("total_quantity", btc_qty))
