@@ -1705,6 +1705,7 @@ def place_market_buy(buy_inr: float) -> dict:
             "order_type":     "market_order",
             "market":         "BTCINR",
             "total_quantity": btc_qty,
+            "ecode":          "I",          # "I" = INR market (required by CoinDCX)
         }
     )
 
@@ -1794,6 +1795,7 @@ def place_market_sell(btc_qty: float) -> dict:
             "order_type":     "market_order",
             "market":         "BTCINR",
             "total_quantity": btc_qty_rounded,
+            "ecode":          "I",          # "I" = INR market (required by CoinDCX)
         }
     )
 
