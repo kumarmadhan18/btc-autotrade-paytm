@@ -1699,17 +1699,21 @@ def place_market_buy(buy_inr: float) -> dict:
         )
 
     order_resp = _coindcx_signed_request(
-        "/exchange/v1/orders/create",
+        "/exchange/v1/orders/create_multiple",
         {
-            "side":           "buy",
-            "order_type":     "market_order",
-            "market":         "BTCINR",
-            "total_quantity": btc_qty,
-            "ecode":          "I",          # "I" = INR market (required by CoinDCX)
+            "orders": [
+                {
+                    "side":           "buy",
+                    "order_type":     "market_order",
+                    "market":         "BTCINR",
+                    "total_quantity": btc_qty,
+                }
+            ]
         }
     )
-
-    order_id = order_resp.get("id") or order_resp.get("orders", [{}])[0].get("id", "")
+    # Response is {"orders": [...]}
+    orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
+    order_id = orders_list[0].get("id", "") if orders_list else ""
 
     conn = get_mysql_connection()
     if conn:
@@ -1789,17 +1793,20 @@ def place_market_sell(btc_qty: float) -> dict:
         )
 
     order_resp = _coindcx_signed_request(
-        "/exchange/v1/orders/create",
+        "/exchange/v1/orders/create_multiple",
         {
-            "side":           "sell",
-            "order_type":     "market_order",
-            "market":         "BTCINR",
-            "total_quantity": btc_qty_rounded,
-            "ecode":          "I",          # "I" = INR market (required by CoinDCX)
+            "orders": [
+                {
+                    "side":           "sell",
+                    "order_type":     "market_order",
+                    "market":         "BTCINR",
+                    "total_quantity": btc_qty_rounded,
+                }
+            ]
         }
     )
-
-    order_id = order_resp.get("id") or order_resp.get("orders", [{}])[0].get("id", "")
+    orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
+    order_id = orders_list[0].get("id", "") if orders_list else ""
 
     conn = get_mysql_connection()
     if conn:
