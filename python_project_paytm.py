@@ -1708,6 +1708,7 @@ def place_market_buy(buy_inr: float) -> dict:
                     "market":         "BTCINR",
                     "total_quantity": btc_qty,
                     "ecode":          "I",
+                    "timestamp":      int(time.time() * 1000),
                 }
             ]
         }
@@ -1803,6 +1804,7 @@ def place_market_sell(btc_qty: float) -> dict:
                     "market":         "BTCINR",
                     "total_quantity": btc_qty_rounded,
                     "ecode":          "I",
+                    "timestamp":      int(time.time() * 1000),
                 }
             ]
         }
