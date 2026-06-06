@@ -1610,7 +1610,16 @@ def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
         headers=headers,
         timeout=15
     )
-    response.raise_for_status()
+    if not response.ok:
+        try:
+            err_detail = response.json()
+        except Exception:
+            err_detail = response.text
+        raise requests.exceptions.HTTPError(
+            f"{response.status_code} {response.reason} | "
+            f"CoinDCX: {err_detail} | body: {payload}",
+            response=response
+        )
     return response.json()
 
 
@@ -1664,7 +1673,8 @@ def place_market_buy(buy_inr: float) -> dict:
     if not spot_price:
         raise RuntimeError("Cannot fetch BTCINR price — aborting BUY to protect funds.")
 
-    btc_qty = round(buy_inr / spot_price, 6)
+    # CoinDCX requires total_quantity in BTC, rounded to max 6 decimal places
+    btc_qty = float(f"{buy_inr / spot_price:.6f}")
 
     # FIX #11: CoinDCX minimum order size check
     if btc_qty < COINDCX_MIN_BTC_QTY:
@@ -1747,7 +1757,8 @@ def place_market_sell(btc_qty: float) -> dict:
     if not spot_price:
         raise RuntimeError("Cannot fetch BTCINR price — aborting SELL to protect funds.")
 
-    btc_qty_rounded = round(btc_qty, 6)
+    # CoinDCX requires total_quantity in BTC, rounded to max 6 decimal places
+    btc_qty_rounded = float(f"{btc_qty:.6f}")
 
     # FIX #11: CoinDCX minimum order size check
     if btc_qty_rounded < COINDCX_MIN_BTC_QTY:
