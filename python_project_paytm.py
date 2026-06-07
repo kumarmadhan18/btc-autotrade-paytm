@@ -1682,33 +1682,26 @@ def place_market_buy(buy_inr: float) -> dict:
     if live_inr <= 0:
         raise ValueError(f"INR balance is ₹{live_inr:.2f} — nothing to buy with.")
 
-    # Use 98% of live INR balance — keeps 2% buffer for taker fee (0.15%) + rounding
-    usable_inr = live_inr * 0.98
-    if usable_inr < (COINDCX_MIN_BTC_QTY * spot_price):
+    # Use the lesser of requested amount vs live balance, with 2% fee buffer
+    usable_inr = min(buy_inr, live_inr) * 0.98
+    if usable_inr < (COINDCX_MIN_BTC_QTY * spot_price * 1.02):
         raise ValueError(
             f"INR balance ₹{live_inr:.2f} is too low. "
-            f"Need at least ₹{COINDCX_MIN_BTC_QTY * spot_price:.2f} to buy "
+            f"Need at least ₹{COINDCX_MIN_BTC_QTY * spot_price * 1.02:.2f} to buy "
             f"minimum {COINDCX_MIN_BTC_QTY} BTC."
         )
 
-    # For limit order: CoinDCX reserves price_per_unit * total_quantity INR upfront
-    # So we must ensure price * qty <= usable_inr strictly
-    limit_price = int(spot_price)                          # whole rupee price
-    btc_qty     = math.floor((usable_inr / limit_price) / 0.00001) * 0.00001  # floor to 5dp step
+    # floor to 5dp step — never round UP (would exceed balance)
+    limit_price = int(spot_price)
+    btc_qty     = math.floor((usable_inr / limit_price) / 0.00001) * 0.00001
     btc_qty     = round(btc_qty, 5)
 
-    if btc_qty < COINDCX_MIN_BTC_QTY:
+    # Strict minimum — must be strictly greater than COINDCX_MIN_BTC_QTY
+    if btc_qty <= COINDCX_MIN_BTC_QTY:
         raise ValueError(
-            f"Calculated BTC qty {btc_qty:.5f} is below CoinDCX minimum "
-            f"{COINDCX_MIN_BTC_QTY}. Live INR: ₹{live_inr:.2f}, "
-            f"need at least ₹{COINDCX_MIN_BTC_QTY * spot_price:.2f}."
-        )
-
-    cost_check = limit_price * btc_qty
-    if cost_check > live_inr:
-        raise ValueError(
-            f"Order cost ₹{cost_check:.2f} exceeds balance ₹{live_inr:.2f}. "
-            f"Reduce qty or deposit more funds."
+            f"Calculated BTC qty {btc_qty:.5f} is at or below CoinDCX minimum "
+            f"{COINDCX_MIN_BTC_QTY}. Deposit more INR — need at least "
+            f"₹{(COINDCX_MIN_BTC_QTY * 1.1) * spot_price:.2f}."
         )
 
     # Per CoinDCX docs: INR markets MUST use create_multiple with ecode="I"
