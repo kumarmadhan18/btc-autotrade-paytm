@@ -1711,9 +1711,9 @@ def place_market_buy(buy_inr: float) -> dict:
             "orders": [{
                 "side":           "buy",
                 "order_type":     "limit_order",
-                "market":         "I-BTC_INR",  # pair field from markets_details
+                "market":         "BTCINR",
                 "total_quantity": round(btc_qty, 6),
-                "price_per_unit": limit_price,
+                "price_per_unit": str(limit_price),
                 "timestamp":      int(time.time() * 1000),
                 "ecode":          "I",
             }]
@@ -1806,9 +1806,9 @@ def place_market_sell(btc_qty: float) -> dict:
             "orders": [{
                 "side":           "sell",
                 "order_type":     "limit_order",
-                "market":         "I-BTC_INR",  # pair field from markets_details
+                "market":         "BTCINR",
                 "total_quantity": round(btc_qty_rounded, 6),
-                "price_per_unit": limit_price,
+                "price_per_unit": str(limit_price),
                 "timestamp":      int(time.time() * 1000),
                 "ecode":          "I",
             }]
