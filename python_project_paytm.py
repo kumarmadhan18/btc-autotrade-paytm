@@ -1590,7 +1590,9 @@ def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
             "before using LIVE trading."
         )
 
-    body["timestamp"] = int(time.time() * 1000)
+    # create_multiple uses timestamp inside each order object, not at top level
+    if "orders" not in body:
+        body["timestamp"] = int(time.time() * 1000)
     payload   = json.dumps(body, separators=(",", ":"))
     signature = hmac.new(
         API_SECRET.encode("utf-8"),
