@@ -1699,21 +1699,15 @@ def place_market_buy(buy_inr: float) -> dict:
         )
 
     order_resp = _coindcx_signed_request(
-        "/exchange/v1/orders/create_multiple",
+        "/exchange/v1/orders/create",
         {
-            "orders": [
-                {
-                    "side":           "buy",
-                    "order_type":     "market_order",
-                    "market":         "BTCINR",
-                    "total_quantity": btc_qty,
-                    "ecode":          "I",
-                    "timestamp":      int(time.time() * 1000),
-                }
-            ]
+            "side":           "buy",
+            "order_type":     "market_order",
+            "market":         "KC-BTC_INR",
+            "total_quantity": btc_qty,
+            "timestamp":      int(time.time() * 1000),
         }
     )
-    # Response is {"orders": [...]}
     orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
     order_id = orders_list[0].get("id", "") if orders_list else ""
 
@@ -1795,18 +1789,13 @@ def place_market_sell(btc_qty: float) -> dict:
         )
 
     order_resp = _coindcx_signed_request(
-        "/exchange/v1/orders/create_multiple",
+        "/exchange/v1/orders/create",
         {
-            "orders": [
-                {
-                    "side":           "sell",
-                    "order_type":     "market_order",
-                    "market":         "BTCINR",
-                    "total_quantity": btc_qty_rounded,
-                    "ecode":          "I",
-                    "timestamp":      int(time.time() * 1000),
-                }
-            ]
+            "side":           "sell",
+            "order_type":     "market_order",
+            "market":         "KC-BTC_INR",
+            "total_quantity": btc_qty_rounded,
+            "timestamp":      int(time.time() * 1000),
         }
     )
     orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
