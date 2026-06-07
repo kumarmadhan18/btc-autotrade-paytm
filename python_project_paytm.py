@@ -1705,16 +1705,13 @@ def place_market_buy(buy_inr: float) -> dict:
 
     # Per CoinDCX docs: INR markets MUST use create_multiple with ecode="I"
     order_resp = _coindcx_signed_request(
-        "/exchange/v1/orders/create_multiple",
+        "/exchange/v1/orders/create",
         {
-            "orders": [{
-                "side":           "buy",
-                "order_type":     "limit_order",
-                "market":         "BTCINR",
-                "total_quantity": round(btc_qty, 6),
-                "price_per_unit": str(limit_price),
-                "ecode":          "I",
-            }]
+            "side":           "buy",
+            "order_type":     "limit_order",
+            "market":         "BTCINR",
+            "total_quantity": round(btc_qty, 6),
+            "price_per_unit": limit_price,
         }
     )
     orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
@@ -1799,16 +1796,13 @@ def place_market_sell(btc_qty: float) -> dict:
         )
 
     order_resp = _coindcx_signed_request(
-        "/exchange/v1/orders/create_multiple",
+        "/exchange/v1/orders/create",
         {
-            "orders": [{
-                "side":           "sell",
-                "order_type":     "limit_order",
-                "market":         "BTCINR",
-                "total_quantity": round(btc_qty_rounded, 6),
-                "price_per_unit": str(limit_price),
-                "ecode":          "I",
-            }]
+            "side":           "sell",
+            "order_type":     "limit_order",
+            "market":         "BTCINR",
+            "total_quantity": round(btc_qty_rounded, 6),
+            "price_per_unit": limit_price,
         }
     )
     orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
