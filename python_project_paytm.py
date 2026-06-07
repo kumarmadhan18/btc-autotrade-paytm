@@ -1703,13 +1703,11 @@ def place_market_buy(buy_inr: float) -> dict:
         {
             "side":           "buy",
             "order_type":     "market_order",
-            "market":         "KC-BTC_INR",
+            "market":         "BTCINR",
             "total_quantity": btc_qty,
-            "timestamp":      int(time.time() * 1000),
         }
     )
-    orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
-    order_id = orders_list[0].get("id", "") if orders_list else ""
+    order_id = order_resp.get("id") or order_resp.get("orders", [{}])[0].get("id", "")
 
     conn = get_mysql_connection()
     if conn:
@@ -1793,13 +1791,11 @@ def place_market_sell(btc_qty: float) -> dict:
         {
             "side":           "sell",
             "order_type":     "market_order",
-            "market":         "KC-BTC_INR",
+            "market":         "BTCINR",
             "total_quantity": btc_qty_rounded,
-            "timestamp":      int(time.time() * 1000),
         }
     )
-    orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
-    order_id = orders_list[0].get("id", "") if orders_list else ""
+    order_id = order_resp.get("id") or order_resp.get("orders", [{}])[0].get("id", "")
 
     conn = get_mysql_connection()
     if conn:
