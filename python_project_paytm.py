@@ -140,7 +140,7 @@ CUSTOMER_EMAIL = os.getenv("CUSTOMER_EMAIL", os.getenv("CUSTOMER_ID", ""))
 BTC_WALLET_NAME = "btc_autotrade_live"
 
 # CoinDCX BTCINR minimum order quantity (0.0001 BTC)
-COINDCX_MIN_BTC_QTY = 0.0001
+COINDCX_MIN_BTC_QTY = 0.00001  # actual min from markets_details
 
 
 # ─────────────────────────────────────────
@@ -1711,8 +1711,8 @@ def place_market_buy(buy_inr: float) -> dict:
             "orders": [{
                 "side":           "buy",
                 "order_type":     "limit_order",
-                "market":         "BTCINR",
-                "total_quantity": btc_qty,
+                "market":         "I-BTC_INR",  # pair field from markets_details
+                "total_quantity": round(btc_qty, 6),
                 "price_per_unit": limit_price,
                 "timestamp":      int(time.time() * 1000),
                 "ecode":          "I",
@@ -1806,8 +1806,8 @@ def place_market_sell(btc_qty: float) -> dict:
             "orders": [{
                 "side":           "sell",
                 "order_type":     "limit_order",
-                "market":         "BTCINR",
-                "total_quantity": btc_qty_rounded,
+                "market":         "I-BTC_INR",  # pair field from markets_details
+                "total_quantity": round(btc_qty_rounded, 6),
                 "price_per_unit": limit_price,
                 "timestamp":      int(time.time() * 1000),
                 "ecode":          "I",
