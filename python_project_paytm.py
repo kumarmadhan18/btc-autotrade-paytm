@@ -1591,9 +1591,8 @@ def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
             "before using LIVE trading."
         )
 
-    # create_multiple: timestamp inside each order, NOT at top level (per official docs)
-    if "orders" not in body:
-        body["timestamp"] = int(time.time() * 1000)
+    # Always add top-level timestamp — required for HMAC signature validation
+    body["timestamp"] = int(time.time() * 1000)
     payload   = json.dumps(body, separators=(",", ":"))
     signature = hmac.new(
         API_SECRET.encode("utf-8"),
@@ -1714,7 +1713,6 @@ def place_market_buy(buy_inr: float) -> dict:
                 "market":         "BTCINR",
                 "total_quantity": round(btc_qty, 6),
                 "price_per_unit": str(limit_price),
-                "timestamp":      int(time.time() * 1000),
                 "ecode":          "I",
             }]
         }
@@ -1809,7 +1807,6 @@ def place_market_sell(btc_qty: float) -> dict:
                 "market":         "BTCINR",
                 "total_quantity": round(btc_qty_rounded, 6),
                 "price_per_unit": str(limit_price),
-                "timestamp":      int(time.time() * 1000),
                 "ecode":          "I",
             }]
         }
