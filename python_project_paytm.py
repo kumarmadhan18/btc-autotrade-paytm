@@ -1689,7 +1689,7 @@ def place_market_buy(buy_inr: float) -> dict:
         )
 
     # CoinDCX requires total_quantity in BTC, max 6 decimal places
-    btc_qty = float(f"{usable_inr / spot_price:.6f}")
+    btc_qty = float(f"{usable_inr / spot_price:.5f}")  # BTCINR step = 0.00001 (5dp)
 
     if btc_qty < COINDCX_MIN_BTC_QTY:
         raise ValueError(
@@ -1784,7 +1784,7 @@ def place_market_sell(btc_qty: float) -> dict:
         raise RuntimeError("Cannot fetch BTCINR price — aborting SELL to protect funds.")
 
     # CoinDCX requires total_quantity in BTC, rounded to max 6 decimal places
-    btc_qty_rounded = float(f"{btc_qty:.6f}")
+    btc_qty_rounded = float(f"{btc_qty:.5f}")  # BTCINR step = 0.00001 (5dp)
 
     # FIX #11: CoinDCX minimum order size check
     if btc_qty_rounded < COINDCX_MIN_BTC_QTY:
