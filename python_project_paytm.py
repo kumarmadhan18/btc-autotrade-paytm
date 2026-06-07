@@ -48,6 +48,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import os
 import time
+import math
 import csv
 import base64
 import hmac
@@ -1690,14 +1691,24 @@ def place_market_buy(buy_inr: float) -> dict:
             f"minimum {COINDCX_MIN_BTC_QTY} BTC."
         )
 
-    # CoinDCX requires total_quantity in BTC, max 6 decimal places
-    btc_qty = float(f"{usable_inr / spot_price:.5f}")  # BTCINR step = 0.00001 (5dp)
+    # For limit order: CoinDCX reserves price_per_unit * total_quantity INR upfront
+    # So we must ensure price * qty <= usable_inr strictly
+    limit_price = int(spot_price)                          # whole rupee price
+    btc_qty     = math.floor((usable_inr / limit_price) / 0.00001) * 0.00001  # floor to 5dp step
+    btc_qty     = round(btc_qty, 5)
 
     if btc_qty < COINDCX_MIN_BTC_QTY:
         raise ValueError(
-            f"Calculated BTC qty {btc_qty:.6f} is below CoinDCX minimum "
+            f"Calculated BTC qty {btc_qty:.5f} is below CoinDCX minimum "
             f"{COINDCX_MIN_BTC_QTY}. Live INR: ₹{live_inr:.2f}, "
             f"need at least ₹{COINDCX_MIN_BTC_QTY * spot_price:.2f}."
+        )
+
+    cost_check = limit_price * btc_qty
+    if cost_check > live_inr:
+        raise ValueError(
+            f"Order cost ₹{cost_check:.2f} exceeds balance ₹{live_inr:.2f}. "
+            f"Reduce qty or deposit more funds."
         )
 
     # Per CoinDCX docs: INR markets MUST use create_multiple with ecode="I"
@@ -1709,7 +1720,7 @@ def place_market_buy(buy_inr: float) -> dict:
                 "order_type":     "limit_order",
                 "market":         "BTCINR",
                 "total_quantity": btc_qty,
-                "price_per_unit": int(spot_price),  # limit at current price = instant fill
+                "price_per_unit": limit_price,
                 "timestamp":      int(time.time() * 1000),
                 "ecode":          "I",
             }]
@@ -1782,20 +1793,20 @@ def place_market_sell(btc_qty: float) -> dict:
             "order_id":   f"TEST_{uuid.uuid4().hex[:10]}",
         }
 
-    spot_price = cd_get_market_price("BTCINR")
+    spot_price      = cd_get_market_price("BTCINR")
     if not spot_price:
         raise RuntimeError("Cannot fetch BTCINR price — aborting SELL to protect funds.")
+    limit_price     = int(spot_price)
 
-    # CoinDCX requires total_quantity in BTC, rounded to max 6 decimal places
-    btc_qty_rounded = float(f"{btc_qty:.5f}")  # BTCINR step = 0.00001 (5dp)
+    # Floor to 5dp step — never sell more than we have
+    btc_qty_rounded = math.floor(btc_qty / 0.00001) * 0.00001
+    btc_qty_rounded = round(btc_qty_rounded, 5)
 
-    # FIX #11: CoinDCX minimum order size check
     if btc_qty_rounded < COINDCX_MIN_BTC_QTY:
         raise ValueError(
-            f"BTC qty {btc_qty_rounded:.6f} is below CoinDCX minimum {COINDCX_MIN_BTC_QTY}."
+            f"BTC qty {btc_qty_rounded:.5f} is below CoinDCX minimum {COINDCX_MIN_BTC_QTY}."
         )
 
-    # Per CoinDCX docs: INR markets MUST use create_multiple with ecode="I"
     order_resp = _coindcx_signed_request(
         "/exchange/v1/orders/create_multiple",
         {
@@ -1804,7 +1815,7 @@ def place_market_sell(btc_qty: float) -> dict:
                 "order_type":     "limit_order",
                 "market":         "BTCINR",
                 "total_quantity": btc_qty_rounded,
-                "price_per_unit": int(spot_price),  # limit at current price = instant fill
+                "price_per_unit": limit_price,
                 "timestamp":      int(time.time() * 1000),
                 "ecode":          "I",
             }]
