@@ -1698,16 +1698,22 @@ def place_market_buy(buy_inr: float) -> dict:
             f"need at least ₹{COINDCX_MIN_BTC_QTY * spot_price:.2f}."
         )
 
+    # Per CoinDCX docs: INR markets MUST use create_multiple with ecode="I"
     order_resp = _coindcx_signed_request(
-        "/exchange/v1/orders/create",
+        "/exchange/v1/orders/create_multiple",
         {
-            "side":           "buy",
-            "order_type":     "market_order",
-            "market":         "BTCINR",
-            "total_quantity": btc_qty,
+            "orders": [{
+                "side":           "buy",
+                "order_type":     "market_order",
+                "market":         "BTCINR",
+                "total_quantity": btc_qty,
+                "ecode":          "I",
+                "timestamp":      int(time.time() * 1000),
+            }]
         }
     )
-    order_id = order_resp.get("id") or order_resp.get("orders", [{}])[0].get("id", "")
+    orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
+    order_id = orders_list[0].get("id", "") if orders_list else ""
 
     conn = get_mysql_connection()
     if conn:
@@ -1786,16 +1792,22 @@ def place_market_sell(btc_qty: float) -> dict:
             f"BTC qty {btc_qty_rounded:.6f} is below CoinDCX minimum {COINDCX_MIN_BTC_QTY}."
         )
 
+    # Per CoinDCX docs: INR markets MUST use create_multiple with ecode="I"
     order_resp = _coindcx_signed_request(
-        "/exchange/v1/orders/create",
+        "/exchange/v1/orders/create_multiple",
         {
-            "side":           "sell",
-            "order_type":     "market_order",
-            "market":         "BTCINR",
-            "total_quantity": btc_qty_rounded,
+            "orders": [{
+                "side":           "sell",
+                "order_type":     "market_order",
+                "market":         "BTCINR",
+                "total_quantity": btc_qty_rounded,
+                "ecode":          "I",
+                "timestamp":      int(time.time() * 1000),
+            }]
         }
     )
-    order_id = order_resp.get("id") or order_resp.get("orders", [{}])[0].get("id", "")
+    orders_list = order_resp if isinstance(order_resp, list) else order_resp.get("orders", [order_resp])
+    order_id = orders_list[0].get("id", "") if orders_list else ""
 
     conn = get_mysql_connection()
     if conn:
