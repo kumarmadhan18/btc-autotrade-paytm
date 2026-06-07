@@ -1692,9 +1692,10 @@ def place_market_buy(buy_inr: float) -> dict:
         )
 
     # floor to 5dp step — never round UP (would exceed balance)
-    limit_price = int(spot_price)
-    btc_qty     = math.floor((usable_inr / limit_price) / 0.00001) * 0.00001
-    btc_qty     = round(btc_qty, 5)
+    limit_price_int = int(spot_price)
+    limit_price     = str(limit_price_int)  # string per CoinDCX docs
+    btc_qty         = math.floor((usable_inr / limit_price_int) / 0.00001) * 0.00001
+    btc_qty         = round(btc_qty, 5)
 
     # Strict minimum — must be strictly greater than COINDCX_MIN_BTC_QTY
     if btc_qty <= COINDCX_MIN_BTC_QTY:
@@ -1789,7 +1790,8 @@ def place_market_sell(btc_qty: float) -> dict:
     spot_price      = cd_get_market_price("BTCINR")
     if not spot_price:
         raise RuntimeError("Cannot fetch BTCINR price — aborting SELL to protect funds.")
-    limit_price     = int(spot_price)
+    limit_price_int = int(spot_price)
+    limit_price     = str(limit_price_int)  # string per CoinDCX docs
 
     # Floor to 5dp step — never sell more than we have
     btc_qty_rounded = math.floor(btc_qty / 0.00001) * 0.00001
