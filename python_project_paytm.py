@@ -1590,7 +1590,7 @@ def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
             "before using LIVE trading."
         )
 
-    # create_multiple uses timestamp inside each order object, not at top level
+    # create_multiple: timestamp inside each order, NOT at top level (per official docs)
     if "orders" not in body:
         body["timestamp"] = int(time.time() * 1000)
     payload   = json.dumps(body, separators=(",", ":"))
@@ -1706,11 +1706,12 @@ def place_market_buy(buy_inr: float) -> dict:
         {
             "orders": [{
                 "side":           "buy",
-                "order_type":     "market_order",
+                "order_type":     "limit_order",
                 "market":         "BTCINR",
                 "total_quantity": btc_qty,
-                "ecode":          "I",
+                "price_per_unit": int(spot_price),  # limit at current price = instant fill
                 "timestamp":      int(time.time() * 1000),
+                "ecode":          "I",
             }]
         }
     )
@@ -1800,11 +1801,12 @@ def place_market_sell(btc_qty: float) -> dict:
         {
             "orders": [{
                 "side":           "sell",
-                "order_type":     "market_order",
+                "order_type":     "limit_order",
                 "market":         "BTCINR",
                 "total_quantity": btc_qty_rounded,
-                "ecode":          "I",
+                "price_per_unit": int(spot_price),  # limit at current price = instant fill
                 "timestamp":      int(time.time() * 1000),
+                "ecode":          "I",
             }]
         }
     )
