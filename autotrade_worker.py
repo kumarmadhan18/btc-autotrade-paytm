@@ -1,30 +1,30 @@
 # ============================================================
 # autotrade_worker.py — Standalone Auto-Trade Worker
-# Version: 1.0 | Python 3.11
+# Version: 2.0 | Python 3.11
 #
-# Runs independently of Streamlit UI.
-# No page refresh needed. Bot keeps running 24/7 on Render.
+# Runs 24/7 independently of Streamlit UI on Render.
+# No browser tab needed. Worker NEVER exits — only pauses.
 #
-# HOW IT WORKS:
-#   - Reads autotrade ON/OFF status from DB every POLL_INTERVAL seconds
-#   - When active: fetches live BTC/INR price → runs trade logic
-#   - Telegram notifications for every BUY / SELL / error
-#   - Safe: uses same DB trade lock as Streamlit to prevent double-orders
+# TELEGRAM COMMANDS:
+#   /stop  → pauses trading (worker stays alive)
+#   /start → resumes trading
+#   /status → shows current status
 #
 # RENDER SETUP:
-#   Add a new Background Worker service on Render:
+#   New Background Worker service:
 #   Start cmd: python autotrade_worker.py
-#   Same env vars as your main Streamlit service
+#   Same env vars as Streamlit service
 #
-# REQUIRED ENV VARS (same as main bot):
+# REQUIRED ENV VARS:
 #   APP_ENV, REAL_TRADING
 #   COINDCX_API_KEY, COINDCX_API_SECRET
-#   PG_HOST, PG_USER, PG_PASSWORD, PG_DB, PG_PORT
-#   BOT_TOKEN, CHAT_ID
+#   MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB, MYSQL_PORT
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 #   ENABLE_NOTIFICATIONS
 # ============================================================
 
 import os
+import math
 import time
 import json
 import hmac
@@ -45,26 +45,25 @@ REAL_TRADING = os.getenv("REAL_TRADING", "false").lower() in ("1", "true", "yes"
 
 API_KEY    = os.getenv("COINDCX_API_KEY", "")
 API_SECRET = os.getenv("COINDCX_API_SECRET", "")
-BASE_URL   = "https://api.coindcx.com"
+BASE_URL   = "https://api.coindcx.com"    # ticker, balances
+SPOT_URL   = "https://apigw.coindcx.com"  # spot order placement (new URL)
 
 BOT_TOKEN            = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID              = os.getenv("TELEGRAM_CHAT_ID", "")
 ENABLE_NOTIFICATIONS = os.getenv("ENABLE_NOTIFICATIONS", "true").lower() == "true"
 
-COINDCX_MIN_BTC_QTY = 0.0001
+COINDCX_MIN_BTC_QTY   = 0.00001   # actual min from CoinDCX markets_details
+POLL_INTERVAL         = 30         # seconds between each trade check
+DEFAULT_TARGET_PCT    = 1.5        # 1.354% breakeven + 0.15% net profit
+DEFAULT_STOP_LOSS_PCT = 2.0
+DEFAULT_DAILY_LOSS_LIMIT = 5.0
 
-# How often the worker polls price and checks trade conditions (seconds)
-POLL_INTERVAL = 30   # every 30s — fast enough, won't hammer the API
-
-# Stop-loss defaults (same as main bot)
-DEFAULT_STOP_LOSS_PCT     = 2.0
-DEFAULT_TARGET_PCT        = 1.5   # 1.354% breakeven (taker+GST+TDS) + 0.15% net
-DEFAULT_TRAILING_STOP_PCT = 1.5
-DEFAULT_DAILY_LOSS_LIMIT  = 5.0
+# Telegram update offset — tracks last processed message
+_tg_offset = 0
 
 
 # ─────────────────────────────────────────
-# Logging helper
+# Logging
 # ─────────────────────────────────────────
 def log(msg: str):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
@@ -128,27 +127,39 @@ def send_telegram(msg: str):
         log(f"⚠️ Telegram send failed: {e}")
 
 
-def poll_telegram_stop_command() -> bool:
-    """Returns True if user sent /stop to Telegram bot."""
+def poll_telegram_commands() -> str | None:
+    """
+    Polls Telegram for commands.
+    Returns: "stop", "start", "status", or None.
+    Worker NEVER exits on /stop — only pauses trading.
+    """
+    global _tg_offset
     if not BOT_TOKEN or not CHAT_ID:
-        return False
+        return None
     try:
         r = requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-            params={"offset": -5, "timeout": 2},
+            params={"offset": _tg_offset, "timeout": 2, "limit": 10},
             timeout=5
         )
-        for update in r.json().get("result", []):
+        updates = r.json().get("result", [])
+        command = None
+        for update in updates:
+            _tg_offset = update["update_id"] + 1
             txt = update.get("message", {}).get("text", "").strip().lower()
             if txt in ("/stop", "stop"):
-                return True
+                command = "stop"
+            elif txt in ("/start", "start"):
+                command = "start"
+            elif txt in ("/status", "status"):
+                command = "status"
+        return command
     except Exception:
-        pass
-    return False
+        return None
 
 
 # ─────────────────────────────────────────
-# CoinDCX API Helpers
+# CoinDCX API
 # ─────────────────────────────────────────
 def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
     if not API_KEY or not API_SECRET:
@@ -165,8 +176,16 @@ def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
         "X-AUTH-APIKEY":    API_KEY,
         "X-AUTH-SIGNATURE": signature,
     }
-    resp = requests.post(f"{BASE_URL}{endpoint}", data=payload, headers=headers, timeout=15)
-    resp.raise_for_status()
+    resp = requests.post(f"{SPOT_URL}{endpoint}", data=payload, headers=headers, timeout=15)
+    if not resp.ok:
+        try:
+            err = resp.json()
+        except Exception:
+            err = resp.text
+        raise requests.exceptions.HTTPError(
+            f"{resp.status_code} {resp.reason} | CoinDCX: {err} | body: {payload}",
+            response=resp
+        )
     return resp.json()
 
 
@@ -182,7 +201,6 @@ def get_market_price(symbol="BTCINR") -> float | None:
 
 
 def _fetch_coindcx_balances() -> dict:
-    """Returns dict like {"INR": 5000.0, "BTC": 0.00123}"""
     try:
         timestamp_ms = str(int(time.time() * 1000))
         body = json.dumps({"timestamp": timestamp_ms}, separators=(",", ":"))
@@ -203,101 +221,75 @@ def _fetch_coindcx_balances() -> dict:
         resp.raise_for_status()
         return {
             item.get("currency", "").upper(): float(item.get("balance", 0.0))
-            for item in resp.json()
-            if item.get("currency")
+            for item in resp.json() if item.get("currency")
         }
     except Exception as e:
-        log(f"❌ CoinDCX balance fetch failed: {e}")
+        log(f"❌ Balance fetch failed: {e}")
         return {}
 
 
-def _poll_order_status(order_id: str, max_wait: int = 30) -> dict:
-    data = {}
+def _poll_order_status(order_id: str, max_wait: int = 60) -> dict:
     for _ in range(max_wait):
         time.sleep(1)
-        data = _coindcx_signed_request("/exchange/v1/orders/status", {"id": order_id})
-        if data.get("status") in ("filled", "cancelled", "rejected"):
-            return data
-    send_telegram(
-        f"⚠️ Order {order_id} still open after {max_wait}s. "
-        f"Status: {data.get('status','unknown')}. Check exchange manually."
-    )
-    return data
+        try:
+            data = _coindcx_signed_request(
+                "/exchange/v1/orders/status",
+                {"id": str(order_id)}
+            )
+            if data.get("status") in ("filled", "cancelled", "rejected", "closed"):
+                return data
+        except Exception:
+            pass
+    return {"status": "unknown", "id": order_id}
 
 
 # ─────────────────────────────────────────
 # Order Placement
 # ─────────────────────────────────────────
-def place_market_buy(buy_inr: float) -> dict:
+def place_order(side: str, btc_qty: float, spot_price: float) -> dict:
+    """Places a limit order at current market price (instant fill)."""
     if not REAL_TRADING:
-        spot = get_market_price() or 1.0
-        btc  = buy_inr / spot
-        fee  = btc * 0.001
-        return {"status": "filled", "filled_qty": round(btc - fee, 8),
-                "avg_price": spot, "fee": round(fee, 8),
-                "order_id": f"TEST_{uuid.uuid4().hex[:8]}"}
+        fee = btc_qty * spot_price * 0.001
+        return {
+            "status":     "filled",
+            "filled_qty": round(btc_qty - (fee / spot_price if side == "buy" else 0), 8),
+            "avg_price":  spot_price,
+            "fee":        round(fee, 8),
+            "order_id":   f"TEST_{uuid.uuid4().hex[:8]}"
+        }
 
-    spot = get_market_price()
-    if not spot:
-        raise RuntimeError("Cannot fetch price — aborting BUY.")
+    limit_price = int(spot_price)
+    qty         = round(btc_qty, 6)
 
-    btc_qty = round(buy_inr / spot, 6)
-    if btc_qty < COINDCX_MIN_BTC_QTY:
-        raise ValueError(
-            f"BTC qty {btc_qty:.6f} below minimum {COINDCX_MIN_BTC_QTY}. "
-            f"Need at least ₹{COINDCX_MIN_BTC_QTY * spot:.2f}."
-        )
-
-    resp     = _coindcx_signed_request("/exchange/v1/orders/create", {
-        "side": "buy", "order_type": "market_order",
-        "market": "BTCINR", "total_quantity": btc_qty
-    })
-    order_id = resp.get("id") or resp.get("orders", [{}])[0].get("id", "")
-    _log_live_trade(order_id, "BUY", btc_qty, spot, "PENDING")
-
-    final      = _poll_order_status(order_id)
-    filled_qty = float(final.get("total_quantity", btc_qty))
-    avg_price  = float(final.get("avg_price") or spot)
-    fee_btc    = float(final.get("fee_amount", 0))
-    _update_live_trade(order_id, final.get("status", "filled"), avg_price, filled_qty, fee_btc)
-
-    return {"status": final.get("status", "filled"),
-            "filled_qty": round(filled_qty - fee_btc, 8),
-            "avg_price": avg_price, "fee": round(fee_btc, 8), "order_id": order_id}
-
-
-def place_market_sell(btc_qty: float) -> dict:
-    if not REAL_TRADING:
-        spot    = get_market_price() or 1.0
-        fee_inr = btc_qty * spot * 0.001
-        return {"status": "filled", "filled_qty": round(btc_qty, 8),
-                "avg_price": spot, "fee": round(fee_inr, 2),
-                "order_id": f"TEST_{uuid.uuid4().hex[:8]}"}
-
-    spot = get_market_price()
-    if not spot:
-        raise RuntimeError("Cannot fetch price — aborting SELL.")
-
-    qty = round(btc_qty, 6)
     if qty < COINDCX_MIN_BTC_QTY:
         raise ValueError(f"BTC qty {qty:.6f} below minimum {COINDCX_MIN_BTC_QTY}.")
 
-    resp     = _coindcx_signed_request("/exchange/v1/orders/create", {
-        "side": "sell", "order_type": "market_order",
-        "market": "BTCINR", "total_quantity": qty
-    })
-    order_id = resp.get("id") or resp.get("orders", [{}])[0].get("id", "")
-    _log_live_trade(order_id, "SELL", qty, spot, "PENDING")
+    resp = _coindcx_signed_request(
+        "/exchange/v1/orders/create",
+        {
+            "side":           side,
+            "order_type":     "limit_order",
+            "market":         "BTCINR",
+            "total_quantity": qty,
+            "price_per_unit": limit_price,
+        }
+    )
+
+    orders_list = resp if isinstance(resp, list) else resp.get("orders", [resp])
+    order_id    = str(orders_list[0].get("id", "")) if orders_list else ""
 
     final      = _poll_order_status(order_id)
     filled_qty = float(final.get("total_quantity", qty))
-    avg_price  = float(final.get("avg_price") or spot)
-    fee_inr    = float(final.get("fee_amount", 0))
-    _update_live_trade(order_id, final.get("status", "filled"), avg_price, filled_qty, fee_inr)
+    avg_price  = float(final.get("avg_price") or spot_price)
+    fee        = float(final.get("fee_amount", 0))
 
-    return {"status": final.get("status", "filled"),
-            "filled_qty": round(filled_qty, 8),
-            "avg_price": avg_price, "fee": round(fee_inr, 2), "order_id": order_id}
+    return {
+        "status":     final.get("status", "filled"),
+        "filled_qty": round(filled_qty, 8),
+        "avg_price":  avg_price,
+        "fee":        round(fee, 8),
+        "order_id":   order_id
+    }
 
 
 # ─────────────────────────────────────────
@@ -320,6 +312,26 @@ def get_autotrade_active() -> bool:
         conn.close()
 
 
+def set_autotrade_active(active: bool, reason: str = ""):
+    conn = get_db()
+    if not conn:
+        return
+    mode       = "LIVE" if REAL_TRADING else "TEST"
+    trade_type = "AUTO_TRADE_START" if active else "AUTO_TRADE_STOP"
+    try:
+        cur = get_cursor(conn)
+        cur.execute("""
+            INSERT INTO wallet_transactions
+            (trade_time, action, amount, balance_after, inr_value,
+             trade_type, autotrade_active, status, trade_mode)
+            VALUES (NOW(), %s, 0, 0, 0, %s, %s, 'SUCCESS', %s)
+        """, (trade_type, trade_type, active, mode))
+        conn.commit()
+        log(f"{'▶️' if active else '⏸'} Auto-Trade {'started' if active else 'paused'} in DB. {reason}")
+    finally:
+        conn.close()
+
+
 def acquire_trade_lock() -> bool:
     conn = get_db()
     if not conn:
@@ -332,8 +344,7 @@ def acquire_trade_lock() -> bool:
         """)
         conn.commit()
         return cur.rowcount == 1
-    except Exception as e:
-        log(f"❌ acquire_trade_lock: {e}")
+    except Exception:
         return False
     finally:
         conn.close()
@@ -359,7 +370,7 @@ def get_entry_price() -> float:
         cur = get_cursor(conn)
         cur.execute("SELECT entry_price FROM trade_state WHERE id=1")
         row = cur.fetchone()
-        return float(row["entry_price"]) if row else 0.0
+        return float(row["entry_price"]) if row and row.get("entry_price") else 0.0
     finally:
         conn.close()
 
@@ -388,31 +399,6 @@ def clear_entry_price():
         conn.close()
 
 
-def get_last_sell_price() -> float:
-    conn = get_db()
-    if not conn:
-        return 0.0
-    try:
-        cur = get_cursor(conn)
-        cur.execute("SELECT last_sell_price FROM trade_state WHERE id=1")
-        row = cur.fetchone()
-        return float(row["last_sell_price"]) if row and row.get("last_sell_price") else 0.0
-    finally:
-        conn.close()
-
-
-def save_last_sell_price(price: float):
-    conn = get_db()
-    if not conn:
-        return
-    try:
-        cur = get_cursor(conn)
-        cur.execute("UPDATE trade_state SET last_sell_price=%s WHERE id=1", (price,))
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def get_last_auto_trade() -> dict | None:
     conn = get_db()
     if not conn:
@@ -430,12 +416,9 @@ def get_last_auto_trade() -> dict | None:
         row = cur.fetchone()
         if not row:
             return None
-        r = dict(row)
+        r   = dict(row)
         raw = r.get("trade_type", "")
-        if raw.startswith("AUTO_SELL"):
-            r["trade_type"] = "AUTO_SELL"
-        elif raw.startswith("AUTO_BUY"):
-            r["trade_type"] = "AUTO_BUY"
+        r["trade_type"] = "AUTO_SELL" if raw.startswith("AUTO_SELL") else "AUTO_BUY"
         return r
     finally:
         conn.close()
@@ -443,8 +426,7 @@ def get_last_auto_trade() -> dict | None:
 
 def get_current_inr_balance() -> float:
     if REAL_TRADING:
-        balances = _fetch_coindcx_balances()
-        return float(balances.get("INR", 0.0))
+        return float(_fetch_coindcx_balances().get("INR", 0.0))
     conn = get_db()
     if not conn:
         return 0.0
@@ -452,15 +434,14 @@ def get_current_inr_balance() -> float:
         cur = get_cursor(conn)
         cur.execute("SELECT balance_after FROM inr_wallet_transactions ORDER BY trade_time DESC LIMIT 1")
         row = cur.fetchone()
-        return float(row["balance_after"]) if row and row["balance_after"] is not None else 0.0
+        return float(row["balance_after"]) if row and row["balance_after"] else 0.0
     finally:
         conn.close()
 
 
 def get_current_btc_balance() -> float:
     if REAL_TRADING:
-        balances = _fetch_coindcx_balances()
-        return float(balances.get("BTC", 0.0))
+        return float(_fetch_coindcx_balances().get("BTC", 0.0))
     conn = get_db()
     if not conn:
         return 0.0
@@ -472,36 +453,34 @@ def get_current_btc_balance() -> float:
             ORDER BY trade_time DESC LIMIT 1
         """)
         row = cur.fetchone()
-        return float(row["balance_after"]) if row and row["balance_after"] is not None else 0.0
+        return float(row["balance_after"]) if row and row["balance_after"] else 0.0
     finally:
         conn.close()
 
 
-def log_wallet_transaction(action, amount, balance, price_inr, trade_type, inr_value_override=None):
+def log_wallet_transaction(action, amount, balance, price_inr, trade_type):
     conn = get_db()
     if not conn:
         return
     mode = "LIVE" if REAL_TRADING else "TEST"
-    inr_val = inr_value_override if inr_value_override is not None else price_inr
     try:
         cur = get_cursor(conn)
         cur.execute("""
             INSERT INTO wallet_transactions
-            (trade_time, action, amount, balance_after, inr_value, trade_type,
-             autotrade_active, status, trade_mode)
+            (trade_time, action, amount, balance_after, inr_value,
+             trade_type, autotrade_active, status, trade_mode)
             VALUES (NOW(), %s, %s, %s, %s, %s, TRUE, 'SUCCESS', %s)
-        """, (str(action), float(amount), float(balance), float(inr_val), str(trade_type), mode))
+        """, (str(action), float(amount), float(balance), float(price_inr), str(trade_type), mode))
         conn.commit()
     finally:
         conn.close()
 
 
-def log_inr_transaction(action, amount, balance, mode=None):
-    if mode is None:
-        mode = "LIVE" if REAL_TRADING else "TEST"
+def log_inr_transaction(action, amount, balance):
     conn = get_db()
     if not conn:
         return
+    mode = "LIVE" if REAL_TRADING else "TEST"
     try:
         cur = get_cursor(conn)
         cur.execute("""
@@ -514,7 +493,7 @@ def log_inr_transaction(action, amount, balance, mode=None):
         conn.close()
 
 
-def save_trade_log(trade_type, btc_amount, btc_balance, price_inr, roi=0):
+def save_trade_log(trade_type, btc_amount, price_inr, roi=0):
     conn = get_db()
     if not conn:
         return
@@ -531,194 +510,90 @@ def save_trade_log(trade_type, btc_amount, btc_balance, price_inr, roi=0):
         conn.close()
 
 
-def _log_live_trade(order_id, action, amount, price, status):
-    conn = get_db()
-    if not conn:
-        return
-    try:
-        cur = get_cursor(conn)
-        cur.execute("""
-            INSERT INTO live_trades
-            (trade_time, order_id, action, amount, price, status, reason)
-            VALUES (NOW(), %s, %s, %s, %s, %s, %s)
-        """, (order_id, action, float(amount), float(price), status, f"AUTO_{action}"))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _update_live_trade(order_id, status, price, amount, fee):
-    conn = get_db()
-    if not conn:
-        return
-    try:
-        cur = get_cursor(conn)
-        cur.execute("""
-            UPDATE live_trades SET status=%s, price=%s, amount=%s, fee=%s
-            WHERE order_id=%s
-        """, (status, float(price), float(amount), float(fee), order_id))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def stop_autotrade_in_db(reason: str):
-    """Marks autotrade as stopped in DB — Streamlit UI will reflect this on next refresh."""
-    conn = get_db()
-    if not conn:
-        return
-    mode = "LIVE" if REAL_TRADING else "TEST"
-    try:
-        cur = get_cursor(conn)
-        cur.execute("""
-            INSERT INTO wallet_transactions
-            (trade_time, action, amount, balance_after, inr_value,
-             trade_type, autotrade_active, status, trade_mode)
-            VALUES (NOW(), 'AUTO_STOP', 0, 0, 0, 'AUTO_TRADE_STOP', FALSE, 'SUCCESS', %s)
-        """, (mode,))
-        conn.commit()
-        log(f"🛑 Auto-Trade stopped in DB: {reason}")
-        send_telegram(f"🛑 Auto-Trade STOPPED by worker\nReason: {reason}")
-    finally:
-        conn.close()
-
-
-def check_daily_loss_limit(pct: float = DEFAULT_DAILY_LOSS_LIMIT) -> bool:
-    conn = get_db()
-    if not conn:
-        return False
-    try:
-        cur = get_cursor(conn)
-        cur.execute("""
-            SELECT start_balance, end_balance FROM wallet_history
-            ORDER BY trade_date DESC LIMIT 1
-        """)
-        row = cur.fetchone()
-        if not row:
-            return False
-        opening = float(row["start_balance"] or 0)
-        current = float(row["end_balance"] or opening)
-        if opening == 0:
-            return False
-        loss_pct = ((opening - current) / opening) * 100
-        if loss_pct >= pct:
-            stop_autotrade_in_db(f"Daily loss limit hit: {loss_pct:.2f}% (limit {pct:.1f}%)")
-            return True
-        return False
-    finally:
-        conn.close()
-
-
 # ─────────────────────────────────────────
 # Core Trade Cycle
 # ─────────────────────────────────────────
 def run_trade_cycle(price_inr: float):
-    """
-    One full evaluation of trade conditions.
-    Same logic as check_auto_trading() in main bot,
-    but runs in a clean loop without Streamlit dependencies.
-    """
-    mode = "LIVE" if REAL_TRADING else "TEST"
-
-    # ── Balances from CoinDCX API (LIVE) or DB (TEST) ──
+    mode        = "LIVE" if REAL_TRADING else "TEST"
     inr_balance = get_current_inr_balance()
     btc_balance = get_current_btc_balance()
 
-    log(f"💰 INR: ₹{inr_balance:,.2f} | BTC: {btc_balance:.6f} | Price: ₹{price_inr:,.2f}")
+    log(f"💰 INR ₹{inr_balance:,.2f} | BTC {btc_balance:.6f} | Price ₹{price_inr:,.2f}")
 
     if btc_balance == 0 and inr_balance == 0:
-        stop_autotrade_in_db("Both balances are zero — no funds to trade.")
+        set_autotrade_active(False, "Both balances zero.")
+        send_telegram("⚠️ Auto-Trade paused — both INR and BTC balances are zero. Deposit funds to resume.")
         return
 
     min_trade_inr = max(500.0, round(COINDCX_MIN_BTC_QTY * price_inr * 1.065, 2))
-
-    # ── Daily loss guard ──
-    if check_daily_loss_limit(DEFAULT_DAILY_LOSS_LIMIT):
-        return
-
-    # ── Settings ──
-    target_pct    = DEFAULT_TARGET_PCT  # 1.5% min after all Indian charges
+    target_pct    = DEFAULT_TARGET_PCT
     stop_loss_pct = DEFAULT_STOP_LOSS_PCT
 
-    # ── Last auto trade ──
     last_auto      = get_last_auto_trade()
     last_type      = last_auto.get("trade_type", "") if last_auto else ""
     last_inr_value = float(last_auto.get("inr_value", 0) or 0) if last_auto else 0.0
 
-    # ── Trade cooldown: 60s between trades ──
+    # 60s cooldown between trades
     if last_auto and last_auto.get("ts"):
         if time.time() - float(last_auto["ts"]) < 60:
             return
 
-    # ── Entry price ──
     entry_price = get_entry_price()
 
-    # ╔════════════════════════════════════╗
-    # ║  STATE A — Have BTC → SELL logic  ║
-    # ╚════════════════════════════════════╝
+    # ══════════════════════════════════════
+    # STATE A — Holding BTC → SELL logic
+    # ══════════════════════════════════════
     if btc_balance >= COINDCX_MIN_BTC_QTY:
 
-        if entry_price == 0 and last_type != "AUTO_SELL":
-            save_entry_price(price_inr)
-            log(f"📌 Entry price set to ₹{price_inr:,.2f}")
-            send_telegram(f"📌 Entry price set to ₹{price_inr:,.2f} — tracking started.")
-            return
-
         if entry_price == 0:
-            return  # just sold, wait for next cycle
+            save_entry_price(price_inr)
+            log(f"📌 Entry price set ₹{price_inr:,.2f}")
+            send_telegram(f"📌 Entry price set to ₹{price_inr:,.2f} — watching for sell target.")
+            return
 
         sell_trigger    = round(entry_price * (1 + target_pct / 100), 2)
         stop_loss_price = round(entry_price * (1 - stop_loss_pct / 100), 2)
         profit_now      = (price_inr - entry_price) * btc_balance
 
-        log(f"📊 Holding BTC | Entry ₹{entry_price:,.2f} | "
-            f"Sell @ ₹{sell_trigger:,.2f} | SL @ ₹{stop_loss_price:,.2f} | "
-            f"P&L ₹{profit_now:+.2f}")
+        log(f"📊 Entry ₹{entry_price:,.2f} | Sell@₹{sell_trigger:,.2f} | SL@₹{stop_loss_price:,.2f} | P&L ₹{profit_now:+.2f}")
 
         if price_inr < sell_trigger and price_inr > stop_loss_price:
-            return  # holding, not yet
+            return  # waiting
 
         sell_reason = "PROFIT_TARGET" if price_inr >= sell_trigger else "STOP_LOSS"
-        log(f"🔔 {sell_reason} triggered! Placing SELL order...")
+        log(f"🔔 {sell_reason} triggered — placing SELL...")
 
-        order = place_market_sell(btc_balance)
-
-        if order["status"] != "filled":
+        order = place_order("sell", btc_balance, price_inr)
+        if order["status"] not in ("filled", "closed"):
             send_telegram(f"⚠️ SELL not filled — {order['status']}. Retrying next cycle.")
             return
 
-        sold_btc      = order["filled_qty"]
-        avg_price     = order["avg_price"]
-        fee_inr       = order["fee"]
-        inr_received  = (sold_btc * avg_price) - fee_inr
-        actual_profit = inr_received - (entry_price * sold_btc)
-        roi_pct       = ((avg_price - entry_price) / entry_price) * 100
+        avg_price    = order["avg_price"]
+        sold_btc     = order["filled_qty"]
+        fee          = order["fee"]
+        inr_received = (sold_btc * avg_price) - fee
+        profit       = inr_received - (entry_price * sold_btc)
+        roi_pct      = ((avg_price - entry_price) / entry_price) * 100
+        new_inr      = get_current_inr_balance()
 
-        fresh_inr = get_current_inr_balance()
-        new_inr   = fresh_inr + inr_received if not REAL_TRADING else fresh_inr
-
-        log_wallet_transaction("AUTO_SELL", sold_btc, 0, avg_price, "AUTO_SELL",
-                               inr_value_override=avg_price)
-        log_inr_transaction("AUTO_SELL", inr_received, new_inr, mode)
-        save_trade_log("AUTO_SELL", sold_btc, 0, avg_price, roi_pct)
+        log_wallet_transaction("AUTO_SELL", sold_btc, 0, avg_price, "AUTO_SELL")
+        log_inr_transaction("AUTO_SELL", inr_received, new_inr)
+        save_trade_log("AUTO_SELL", sold_btc, avg_price, roi_pct)
         clear_entry_price()
-        save_last_sell_price(avg_price)
 
         icon = "🟢" if sell_reason == "PROFIT_TARGET" else "🛑"
-        msg  = (
-            f"{icon} AUTO SELL ({sell_reason})\n"
+        send_telegram(
+            f"{icon} *AUTO SELL — {sell_reason}*\n"
             f"  {sold_btc:.6f} BTC → ₹{inr_received:,.2f}\n"
             f"  Entry ₹{entry_price:,.2f} → Exit ₹{avg_price:,.2f}\n"
-            f"  Profit: ₹{actual_profit:+.2f} | Fee: ₹{fee_inr:.2f} | ROI: {roi_pct:+.2f}%\n"
-            f"  Next buy when ≤ ₹{round(avg_price * (1 - target_pct/100), 2):,.2f}"
+            f"  Profit: ₹{profit:+.2f} | ROI: {roi_pct:+.2f}%\n"
+            f"  Next buy when ≤ ₹{round(avg_price*(1-target_pct/100),2):,.2f}"
         )
-        log(msg)
-        send_telegram(msg)
         return
 
-    # ╔═════════════════════════════════════╗
-    # ║  STATE B — Have INR → BUY logic    ║
-    # ╚═════════════════════════════════════╝
+    # ══════════════════════════════════════
+    # STATE B — Holding INR → BUY logic
+    # ══════════════════════════════════════
     if btc_balance < COINDCX_MIN_BTC_QTY and inr_balance >= min_trade_inr:
 
         should_buy = False
@@ -727,14 +602,12 @@ def run_trade_cycle(price_inr: float):
         if not last_type or last_type not in ("AUTO_BUY", "AUTO_SELL"):
             should_buy = True
             buy_reason = "INITIAL_BUY"
-
         elif last_type == "AUTO_SELL" and last_inr_value > 0:
             buy_trigger = round(last_inr_value * (1 - target_pct / 100), 2)
-            log(f"⏳ Waiting for dip — buy when ≤ ₹{buy_trigger:,.2f} (now ₹{price_inr:,.2f})")
+            log(f"⏳ Waiting for dip ≤ ₹{buy_trigger:,.2f} (now ₹{price_inr:,.2f})")
             if price_inr <= buy_trigger:
                 should_buy = True
                 buy_reason = "DIP_BUY"
-
         elif last_type == "AUTO_BUY":
             should_buy = True
             buy_reason = "REBUY"
@@ -742,71 +615,110 @@ def run_trade_cycle(price_inr: float):
         if not should_buy:
             return
 
-        log(f"🔔 {buy_reason} — Placing BUY with ₹{inr_balance:,.2f}...")
+        log(f"🔔 {buy_reason} — placing BUY with ₹{inr_balance:,.2f}...")
 
-        order = place_market_buy(inr_balance)
+        usable_inr  = inr_balance * 0.98
+        limit_price = int(price_inr)
+        btc_qty     = math.floor((usable_inr / limit_price) / 0.00001) * 0.00001
+        btc_qty     = round(btc_qty, 6)
 
-        if order["status"] != "filled":
+        if btc_qty <= COINDCX_MIN_BTC_QTY:
+            log(f"⚠️ BTC qty {btc_qty:.6f} too low — need more INR.")
+            return
+
+        order = place_order("buy", btc_qty, price_inr)
+        if order["status"] not in ("filled", "closed"):
             send_telegram(f"⚠️ BUY not filled — {order['status']}. Retrying next cycle.")
             return
 
-        btc_bought = order["filled_qty"]
-        avg_price  = order["avg_price"]
-        fee_btc    = order["fee"]
-        new_btc    = btc_bought
-        new_inr    = max(0.0, get_current_inr_balance() - inr_balance) if not REAL_TRADING else 0.0
+        avg_price = order["avg_price"]
+        btc_got   = order["filled_qty"]
+        fee       = order["fee"]
+        new_inr   = get_current_inr_balance()
 
         save_entry_price(avg_price)
-        log_wallet_transaction("AUTO_BUY", btc_bought, new_btc, avg_price, "AUTO_BUY")
-        log_inr_transaction("AUTO_BUY", -inr_balance, new_inr, mode)
-        save_trade_log("AUTO_BUY", btc_bought, new_btc, avg_price)
+        log_wallet_transaction("AUTO_BUY", btc_got, btc_got, avg_price, "AUTO_BUY")
+        log_inr_transaction("AUTO_BUY", -inr_balance, new_inr)
+        save_trade_log("AUTO_BUY", btc_got, avg_price)
 
-        sell_at = round(avg_price * (1 + target_pct / 100), 2)
-        msg = (
-            f"🟢 AUTO BUY ({buy_reason})\n"
-            f"  ₹{inr_balance:,.2f} → {btc_bought:.6f} BTC\n"
-            f"  Price: ₹{avg_price:,.2f} | Fee: {fee_btc:.8f} BTC\n"
-            f"  Sell when ≥ ₹{sell_at:,.2f} (+{target_pct:.2f}%)\n"
+        send_telegram(
+            f"🟢 *AUTO BUY — {buy_reason}*\n"
+            f"  ₹{inr_balance:,.2f} → {btc_got:.6f} BTC\n"
+            f"  Price: ₹{avg_price:,.2f} | Fee: {fee:.8f} BTC\n"
+            f"  Sell target: ₹{round(avg_price*(1+target_pct/100),2):,.2f} (+{target_pct}%)\n"
             f"  Order ID: {order['order_id']}"
         )
-        log(msg)
-        send_telegram(msg)
 
 
 # ─────────────────────────────────────────
 # Main Worker Loop
 # ─────────────────────────────────────────
 def main():
-    log("🚀 autotrade_worker.py started")
-    send_telegram("🤖 Auto-Trade Worker started — monitoring market every 30s.")
+    log("🚀 autotrade_worker.py v2.0 started")
+    send_telegram(
+        "🤖 *Auto-Trade Worker v2.0 started*\n"
+        "Commands:\n"
+        "  /stop → pause trading\n"
+        "  /start → resume trading\n"
+        "  /status → check status"
+    )
 
     consecutive_errors = 0
 
-    while True:
+    while True:   # ← NEVER exits — only pauses on /stop
         try:
-            # ── Telegram kill switch ──
-            if poll_telegram_stop_command():
-                stop_autotrade_in_db("Telegram /stop command received.")
-                log("🛑 Stopped via Telegram /stop command.")
-                break
+            # ── Telegram commands ──────────────────
+            cmd = poll_telegram_commands()
 
-            # ── Check if autotrade is enabled in DB ──
+            if cmd == "stop":
+                set_autotrade_active(False, "Telegram /stop")
+                send_telegram("⏸ Auto-Trade *PAUSED* via Telegram.\nSend /start to resume.")
+                log("⏸ Paused via Telegram /stop")
+
+            elif cmd == "start":
+                set_autotrade_active(True, "Telegram /start")
+                send_telegram("▶️ Auto-Trade *RESUMED* via Telegram.")
+                log("▶️ Resumed via Telegram /start")
+
+            elif cmd == "status":
+                active      = get_autotrade_active()
+                price       = get_market_price("BTCINR") or 0
+                inr_bal     = get_current_inr_balance()
+                btc_bal     = get_current_btc_balance()
+                entry       = get_entry_price()
+                status_icon = "▶️ ACTIVE" if active else "⏸ PAUSED"
+                send_telegram(
+                    f"📊 *Worker Status*\n"
+                    f"  Trading: {status_icon}\n"
+                    f"  BTC Price: ₹{price:,.2f}\n"
+                    f"  INR Balance: ₹{inr_bal:,.2f}\n"
+                    f"  BTC Balance: {btc_bal:.6f}\n"
+                    f"  Entry Price: ₹{entry:,.2f}" if entry else
+                    f"📊 *Worker Status*\n"
+                    f"  Trading: {status_icon}\n"
+                    f"  BTC Price: ₹{price:,.2f}\n"
+                    f"  INR Balance: ₹{inr_bal:,.2f}\n"
+                    f"  BTC Balance: {btc_bal:.6f}\n"
+                    f"  Entry Price: Not set"
+                )
+
+            # ── Check if trading is active ──────────
             if not get_autotrade_active():
                 log("⏸ Auto-Trade is OFF — waiting...")
                 time.sleep(POLL_INTERVAL)
                 consecutive_errors = 0
                 continue
 
-            # ── Fetch current price ──
+            # ── Fetch price ─────────────────────────
             price = get_market_price("BTCINR")
             if not price:
-                log("⚠️ Could not fetch price, skipping cycle.")
+                log("⚠️ Could not fetch price, skipping.")
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # ── Acquire trade lock ──
+            # ── Trade lock ──────────────────────────
             if not acquire_trade_lock():
-                log("🔒 Trade lock held by another process, skipping cycle.")
+                log("🔒 Trade lock held, skipping.")
                 time.sleep(POLL_INTERVAL)
                 continue
 
@@ -819,16 +731,14 @@ def main():
 
         except Exception as e:
             consecutive_errors += 1
-            err_msg = f"❌ Worker error (#{consecutive_errors}): {e}\n{traceback.format_exc()}"
-            log(err_msg)
+            log(f"❌ Worker error #{consecutive_errors}: {e}\n{traceback.format_exc()}")
 
-            # After 5 consecutive errors, stop the bot to protect funds
             if consecutive_errors >= 5:
-                stop_autotrade_in_db(f"Worker stopped after 5 consecutive errors. Last: {e}")
-                log("🛑 Too many errors — worker stopping autotrade to protect funds.")
+                set_autotrade_active(False, f"5 consecutive errors: {e}")
                 send_telegram(
-                    f"🚨 Worker stopped Auto-Trade after 5 errors.\n"
-                    f"Last error: {e}\nPlease check Render logs."
+                    f"🚨 *Auto-Trade paused after 5 errors*\n"
+                    f"Last error: `{e}`\n"
+                    f"Check Render logs. Send /start to resume."
                 )
                 consecutive_errors = 0
 

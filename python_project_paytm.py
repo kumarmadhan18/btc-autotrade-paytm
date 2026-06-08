@@ -115,7 +115,8 @@ razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 # ─────────────────────────────────────────
 API_KEY    = os.getenv("COINDCX_API_KEY", "")
 API_SECRET = os.getenv("COINDCX_API_SECRET", "")
-BASE_URL   = "https://api.coindcx.com"
+BASE_URL   = "https://api.coindcx.com"       # for balances, ticker, non-spot
+SPOT_URL   = "https://apigw.coindcx.com"       # new URL for all Spot REST APIs (mandatory)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -1607,7 +1608,7 @@ def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
     }
 
     response = requests.post(
-        f"{BASE_URL}{endpoint}",
+        f"{SPOT_URL}{endpoint}",
         data=payload,
         headers=headers,
         timeout=15
