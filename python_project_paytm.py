@@ -484,7 +484,28 @@ def save_entry_price(price):
         conn.close()
 
 
-def clear_entry_price():
+def get_last_auto_buy_price() -> float:
+    """
+    Returns the avg_price of the last successful AUTO_BUY from live_trades.
+    Used to restore entry_price after bot restart without losing context.
+    """
+    conn = get_mysql_connection()
+    if not conn:
+        return 0.0
+    try:
+        cursor = get_cursor(conn)
+        cursor.execute("""
+            SELECT price FROM live_trades
+            WHERE action = 'BUY' AND status IN ('filled','partially_filled')
+            ORDER BY trade_time DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        return float(row["price"]) if row and row.get("price") else 0.0
+    finally:
+        conn.close()
+
+
+
     conn = get_mysql_connection()
     if not conn:
         return
@@ -1626,28 +1647,54 @@ def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
     return response.json()
 
 
-def _poll_order_status(order_id: str, max_wait: int = 30) -> dict:
-    """
-    Poll CoinDCX order status until filled, cancelled, rejected, or timeout.
-    FIX #10: Logs a warning if still open after max_wait seconds.
-    """
-    data = {}
-    for _ in range(max_wait):
-        time.sleep(1)
-        data = _coindcx_signed_request(
-            "/exchange/v1/orders/status",
-            {"id": order_id}
-        )
-        status = data.get("status", "")
-        if status in ("filled", "cancelled", "rejected"):
-            return data
+def _cancel_order(order_id: str):
+    """Cancel an open or partially filled order."""
+    try:
+        _coindcx_signed_request("/exchange/v1/orders/cancel", {"id": str(order_id)})
+        log(f"🚫 Order {order_id} cancelled.")
+    except Exception as e:
+        log(f"⚠️ Cancel failed for {order_id}: {e}")
 
-    # Timeout — order still open/partial
-    send_telegram(
-        f"⚠️ Order {order_id} still open after {max_wait}s poll. "
-        f"Last status: {data.get('status','unknown')}. Check exchange manually."
-    )
-    return data
+
+def _poll_order_status(order_id: str, max_wait: int = 120) -> dict:
+    """
+    Poll CoinDCX order status until terminal state.
+    Terminal: filled, cancelled, rejected, closed.
+    Limit orders at market price normally fill within seconds.
+    If partially_filled after max_wait → cancel remainder, return filled portion.
+    If still open after max_wait → cancel order entirely.
+    """
+    data   = {}
+    status = ""
+    for i in range(max_wait):
+        time.sleep(1)
+        try:
+            data   = _coindcx_signed_request("/exchange/v1/orders/status", {"id": str(order_id)})
+            status = data.get("status", "")
+            if status in ("filled", "cancelled", "rejected", "closed"):
+                return data
+            # Log every 30s to avoid spam
+            if i > 0 and i % 30 == 0:
+                log(f"⏳ Order {order_id} still {status} after {i}s...")
+        except Exception as e:
+            log(f"⚠️ Status poll error for {order_id}: {e}")
+
+    # Timeout — cancel whatever is open/partial
+    if status == "partially_filled":
+        filled_qty = float(data.get("total_quantity", 0)) - float(data.get("remaining_quantity", 0))
+        log(f"⚠️ Order {order_id} partially filled ({filled_qty:.6f} BTC) — cancelling remainder.")
+        send_telegram(f"⚠️ Order {order_id} partially filled ({filled_qty:.6f} BTC). Cancelling remainder.")
+        _cancel_order(order_id)
+        # Return with actual filled qty
+        data["_partial_filled_qty"] = filled_qty
+        data["status"]              = "partially_filled"
+        return data
+    else:
+        log(f"⚠️ Order {order_id} still {status} after {max_wait}s — cancelling.")
+        send_telegram(f"⚠️ Order {order_id} still {status} after {max_wait}s — cancelling to protect funds.")
+        _cancel_order(order_id)
+        data["status"] = "cancelled"
+        return data
 
 
 def place_market_buy(buy_inr: float) -> dict:
@@ -1704,7 +1751,15 @@ def place_market_buy(buy_inr: float) -> dict:
             f"₹{(COINDCX_MIN_BTC_QTY * 1.1) * spot_price:.2f}."
         )
 
-    # Per CoinDCX docs: INR markets MUST use create_multiple with ecode="I"
+    # Verify notional value >= min_notional (₹100)
+    notional = btc_qty * spot_price
+    if notional < 100:
+        raise ValueError(
+            f"Order notional ₹{notional:.2f} below CoinDCX minimum ₹100. "
+            f"Deposit more INR."
+        )
+
+    # Per CoinDCX docs: spot order placement
     order_resp = _coindcx_signed_request(
         "/exchange/v1/orders/create",
         {
@@ -1737,9 +1792,18 @@ def place_market_buy(buy_inr: float) -> dict:
     )
 
     final      = _poll_order_status(order_id)
-    filled_qty = float(final.get("total_quantity", btc_qty))
-    avg_price  = float(final.get("avg_price") or spot_price)
-    fee_btc    = float(final.get("fee_amount", 0))
+    final_status = final.get("status", "filled")
+
+    # Use actual filled qty — for partial fills use _partial_filled_qty
+    if "_partial_filled_qty" in final:
+        filled_qty = float(final["_partial_filled_qty"])
+    else:
+        total_qty     = float(final.get("total_quantity", btc_qty))
+        remaining_qty = float(final.get("remaining_quantity", 0))
+        filled_qty    = total_qty - remaining_qty if remaining_qty > 0 else total_qty
+
+    avg_price = float(final.get("avg_price") or spot_price)
+    fee_btc   = float(final.get("fee_amount", 0))
 
     conn = get_mysql_connection()
     if conn:
@@ -1747,13 +1811,21 @@ def place_market_buy(buy_inr: float) -> dict:
         cur.execute("""
             UPDATE live_trades SET status=%s, price=%s, amount=%s, fee=%s
             WHERE order_id=%s
-        """, (final.get("status", "filled"), avg_price, filled_qty, fee_btc, order_id))
+        """, (final_status, avg_price, filled_qty, fee_btc, order_id))
         conn.commit()
         conn.close()
 
+    # Accept filled and partially_filled as success (remainder already cancelled)
+    if final_status in ("filled", "partially_filled") and filled_qty > 0:
+        effective_status = "filled"
+        # Save entry price using actual avg fill price
+        save_entry_price(avg_price)
+    else:
+        effective_status = final_status
+
     return {
-        "status":     final.get("status", "filled"),
-        "filled_qty": round(filled_qty - fee_btc, 8),
+        "status":     effective_status,
+        "filled_qty": round(max(filled_qty - fee_btc, 0), 8),
         "avg_price":  avg_price,
         "fee":        round(fee_btc, 8),
         "order_id":   order_id,
@@ -1782,18 +1854,33 @@ def place_market_sell(btc_qty: float) -> dict:
             "order_id":   f"TEST_{uuid.uuid4().hex[:10]}",
         }
 
-    spot_price      = cd_get_market_price("BTCINR")
+    spot_price = cd_get_market_price("BTCINR")
     if not spot_price:
         raise RuntimeError("Cannot fetch BTCINR price — aborting SELL to protect funds.")
-    limit_price = int(spot_price)  # integer per CoinDCX Python docs
 
-    # Floor to 5dp step — never sell more than we have
-    btc_qty_rounded = math.floor(btc_qty / 0.00001) * 0.00001
-    btc_qty_rounded = round(btc_qty_rounded, 5)
+    # Always use LIVE BTC balance from CoinDCX — session state may be stale
+    live_btc = get_btc_wallet_balance()
+    if live_btc <= 0:
+        raise ValueError(f"Live BTC balance is {live_btc:.8f} — nothing to sell.")
+
+    # Use actual live balance — not the requested qty which may be stale
+    sell_qty        = live_btc
+    limit_price     = int(spot_price)
+    btc_qty_rounded = math.floor(sell_qty / 0.000001) * 0.000001
+    btc_qty_rounded = round(btc_qty_rounded, 6)
 
     if btc_qty_rounded < COINDCX_MIN_BTC_QTY:
         raise ValueError(
-            f"BTC qty {btc_qty_rounded:.5f} is below CoinDCX minimum {COINDCX_MIN_BTC_QTY}."
+            f"BTC balance {live_btc:.6f} is below CoinDCX minimum {COINDCX_MIN_BTC_QTY}. "
+            f"Cannot sell."
+        )
+
+    # Verify notional value >= min_notional (₹100)
+    notional = btc_qty_rounded * spot_price
+    if notional < 100:
+        raise ValueError(
+            f"Order notional ₹{notional:.2f} below CoinDCX minimum ₹100. "
+            f"Need at least {100/spot_price:.6f} BTC to sell."
         )
 
     order_resp = _coindcx_signed_request(
@@ -1820,10 +1907,18 @@ def place_market_sell(btc_qty: float) -> dict:
         conn.commit()
         conn.close()
 
-    final      = _poll_order_status(order_id)
-    filled_qty = float(final.get("total_quantity", btc_qty_rounded))
-    avg_price  = float(final.get("avg_price") or spot_price)
-    fee_inr    = float(final.get("fee_amount", 0))
+    final        = _poll_order_status(order_id)
+    final_status = final.get("status", "filled")
+
+    if "_partial_filled_qty" in final:
+        filled_qty = float(final["_partial_filled_qty"])
+    else:
+        total_qty     = float(final.get("total_quantity", btc_qty_rounded))
+        remaining_qty = float(final.get("remaining_quantity", 0))
+        filled_qty    = total_qty - remaining_qty if remaining_qty > 0 else total_qty
+
+    avg_price = float(final.get("avg_price") or spot_price)
+    fee_inr   = float(final.get("fee_amount", 0))
 
     conn = get_mysql_connection()
     if conn:
@@ -1831,12 +1926,19 @@ def place_market_sell(btc_qty: float) -> dict:
         cur.execute("""
             UPDATE live_trades SET status=%s, price=%s, amount=%s, fee=%s
             WHERE order_id=%s
-        """, (final.get("status", "filled"), avg_price, filled_qty, fee_inr, order_id))
+        """, (final_status, avg_price, filled_qty, fee_inr, order_id))
         conn.commit()
         conn.close()
 
+    # Accept partially_filled as success — remainder was already cancelled
+    if final_status in ("filled", "partially_filled") and filled_qty > 0:
+        effective_status = "filled"
+        clear_entry_price()   # clear entry after any successful sell
+    else:
+        effective_status = final_status
+
     return {
-        "status":     final.get("status", "filled"),
+        "status":     effective_status,
         "filled_qty": round(filled_qty, 8),
         "avg_price":  avg_price,
         "fee":        round(fee_inr, 2),
@@ -2162,8 +2264,18 @@ def start_autotrade():
 
         st.session_state["BTC_WALLET"] = {"balance": btc_balance}
         st.session_state["INR_WALLET"] = {"balance": inr_balance}
+
+        # Restore entry_price from last BUY order — never reset on start/stop
+        existing_entry = float(get_entry_price() or 0)
+        if existing_entry == 0 and btc_balance >= COINDCX_MIN_BTC_QTY:
+            # BTC held but no entry price — recover from last AUTO_BUY
+            _last_buy = get_last_auto_buy_price()
+            if _last_buy:
+                save_entry_price(_last_buy)
+                existing_entry = _last_buy
+
         st.session_state.AUTO_TRADING  = {
-            "active": True, "entry_price": 0.0, "last_price": 0.0, "last_trade": None
+            "active": True, "entry_price": existing_entry, "last_price": 0.0, "last_trade": None
         }
         st.session_state["autotrade_toggle"]    = True
         st.session_state["autotrade_started_at"] = time.time()   # used by idle timeout
