@@ -147,7 +147,7 @@ COINDCX_MIN_BTC_QTY = 0.00001  # actual min from markets_details
 # ─────────────────────────────────────────
 # DB Helpers
 # ─────────────────────────────────────────
-def get_mysql_connection():
+def get_mysql_connection_old():
     """
     Returns a DB connection for the current environment.
     local → MySQL  via pymysql  (DictCursor set at connect time)
@@ -180,7 +180,68 @@ def get_mysql_connection():
         print(f"❌ DB connection failed: {e}")
         return None
 
+def get_last_inr_balance(mode=None):
+    """
+    Returns (balance, timestamp) for INR.
+    LIVE: fetches from CoinDCX API (timestamp = now).
+    TEST: reads last DB record.
+    """
 
+    if mode is None:
+        mode = "LIVE" if is_live() else "TEST"
+
+    # LIVE MODE
+    if mode == "LIVE":
+        try:
+            balances = _fetch_coindcx_balances()
+            if balances and "INR" in balances:
+                return float(balances["INR"]), float(time.time())
+        except Exception as e:
+            print(f"❌ CoinDCX balance fetch failed: {e}")
+
+        return 0.0, None
+
+    # TEST MODE
+    conn = get_mysql_connection()
+
+    if conn is None:
+        print("❌ Database connection unavailable")
+        return 0.0, None
+
+    try:
+        cursor = get_cursor(conn)
+
+        cursor.execute(f"""
+            SELECT
+                balance_after,
+                {epoch_sql('trade_time')} AS ts
+            FROM inr_wallet_transactions
+            WHERE status IN ('SUCCESS','COMPLETED')
+              AND trade_mode = %s
+            ORDER BY trade_time DESC
+            LIMIT 1
+        """, (mode,))
+
+        row = cursor.fetchone()
+
+        if not row:
+            return 0.0, None
+
+        balance = float(row.get("balance_after", 0.0) or 0.0)
+        timestamp = float(row.get("ts", 0.0) or 0.0)
+
+        return balance, timestamp
+
+    except Exception as e:
+        print(f"❌ get_last_inr_balance() failed: {e}")
+        return 0.0, None
+
+    finally:
+        try:
+            conn.close()
+        except:
+            pass
+        
 def get_cursor(conn):
     """Returns a dict-row cursor regardless of DB engine."""
     if APP_ENV == "live":
