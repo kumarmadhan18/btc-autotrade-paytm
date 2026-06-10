@@ -38,7 +38,7 @@
 #     TDS on sell       : 1.0%                   = 1.00%
 #     Total             :                          1.354% breakeven
 #     Recommended min   :                          1.5% target
-#   Stop-Loss: 2% below entry (configurable in UI settings)
+#   Stop-Loss: DISABLED — bot holds BTC until profit target is reached (may take days)
 # ============================================================
 import smtplib
 import requests
@@ -505,9 +505,20 @@ def get_last_auto_buy_price() -> float:
         conn.close()
 
 
-
+def clear_entry_price():
     conn = get_mysql_connection()
     if not conn:
+        return
+    try:
+        cursor = get_cursor(conn)
+        cursor.execute("UPDATE trade_state SET entry_price=0 WHERE id=1")
+        conn.commit()
+    except Exception as e:
+        print(f"❌ clear_entry_price error: {e}")
+    finally:
+        conn.close()
+
+
         return
     try:
         cursor = get_cursor(conn)
@@ -2466,10 +2477,8 @@ def check_auto_sell(price):
     btc_bal = float(
         st.session_state.get("BTC_WALLET", {}).get("balance", BTC_WALLET.get("balance", 0.0))
     )
-    if price < STOP_LOSS_THRESHOLD and btc_bal > 0:
-        msg = f"🔥 PRICE STOP-LOSS @ ₹{price:,.2f}! Auto-selling all BTC..."
-        st.error(msg)
-        send_telegram(msg)
+    # Legacy absolute stop loss DISABLED — see check_auto_trading() for sell logic
+    if False and price < STOP_LOSS_THRESHOLD and btc_bal > 0:
 
         if is_live():
             # FIX: Place the actual SELL order on CoinDCX
@@ -2608,7 +2617,7 @@ def check_auto_trading(price_inr: float):
             return
 
         # ── Settings ─────────────────────────────────────────────
-        stop_loss_pct = float(st.session_state.get("cfg_stop_loss", DEFAULT_STOP_LOSS_PCT))
+        # stop_loss_pct removed — no stop loss, bot holds until profit target only
         target_pct    = float(st.session_state.get("cfg_target_pct", 1.5))   # % move to trigger sell/buy (min 1.5% after TDS+GST+fees)
 
         # ── Last auto trade from DB ──────────────────────────────
@@ -2650,7 +2659,6 @@ def check_auto_trading(price_inr: float):
                     f"🔄 Holding {btc_balance:.6f} BTC\n"
                     f"  Bought @ ₹{entry_price:,.2f} | Now ₹{price_inr:,.2f}\n"
                     f"  P&L: ₹{profit_now:+.2f} | Sell at ₹{sell_at:,.2f} (+{target_pct:.2f}%)\n"
-                    f"  Stop-Loss @ ₹{sl_at:,.2f} (-{stop_loss_pct:.1f}%)"
                 )
             elif inr_balance >= min_trade_inr and last_type == "AUTO_SELL" and last_inr_value > 0:
                 buy_at = round(last_inr_value * (1 - target_pct / 100), 2)
@@ -2670,16 +2678,14 @@ def check_auto_trading(price_inr: float):
 
         # ╔══════════════════════════════════════════════════════╗
         # ║  STATE A — Have BTC                                  ║
-        # ║  Sell when price ≥ entry × (1 + target_pct%)         ║
-        # ║  Stop-Loss if price ≤ entry × (1 - stop_loss%)       ║
-        # ║  Always evaluate sell when BTC > 0, regardless INR   ║
+        # ║  Sell ONLY when price ≥ entry × (1 + target_pct%)    ║
+        # ║  NO stop-loss — bot holds BTC until profit target    ║
+        # ║  This may take hours, days or weeks — that's OK      ║
         # ╚══════════════════════════════════════════════════════╝
         if btc_balance > 0:
 
             # If no entry price AND last trade was a BUY (not a SELL),
             # seed entry from current price so ROI tracking starts now.
-            # Skip if last trade was AUTO_SELL — BTC balance is stale
-            # from session_state and will clear on next DB read.
             if entry_price == 0 and last_type != "AUTO_SELL":
                 save_entry_price(price_inr)
                 entry_price = price_inr
@@ -2689,17 +2695,15 @@ def check_auto_trading(price_inr: float):
                 # Just sold — BTC balance will clear on next refresh, skip sell eval
                 return
 
-            sell_trigger    = round(entry_price * (1 + target_pct / 100), 2)
-            stop_loss_price = round(entry_price * (1 - stop_loss_pct / 100), 2)
-            actual_profit   = (price_inr - entry_price) * btc_balance
+            sell_trigger  = round(entry_price * (1 + target_pct / 100), 2)
+            actual_profit = (price_inr - entry_price) * btc_balance
 
-            is_profit_hit    = price_inr >= sell_trigger
-            is_stop_loss_hit = price_inr <= stop_loss_price
+            # NO stop loss — only sell when profit target is reached
+            # Bot will hold BTC indefinitely until target is hit
+            if price_inr < sell_trigger:
+                return  # holding — waiting for profit target
 
-            if not is_profit_hit and not is_stop_loss_hit:
-                return  # holding, waiting — status already sent above
-
-            sell_reason = "PROFIT_TARGET" if is_profit_hit else "STOP_LOSS"
+            sell_reason = "PROFIT_TARGET"
             order = place_market_sell(btc_balance)
 
             if order["status"] not in ("filled",):
@@ -2734,7 +2738,7 @@ def check_auto_trading(price_inr: float):
             BTC_WALLET["balance"]           = 0.0
             INR_WALLET["balance"]           = new_inr
 
-            icon = "🔴" if sell_reason == "PROFIT_TARGET" else "🛑"
+            icon = "🔴"  # always profit target now — no stop loss
             msg  = (
                 f"{icon} AUTO SELL ({sell_reason})\n"
                 f"  {sold_btc:.6f} BTC → ₹{inr_received:,.2f}\n"
@@ -3412,11 +3416,7 @@ with st.expander("⚙️ Auto-Trade Settings", expanded=False):
             )
 
     with sl_col2:
-        cfg_stop_loss = st.number_input(
-            "🛑 Stop-Loss (%)", min_value=0.1, max_value=50.0, step=0.1,
-            value=float(st.session_state.get("cfg_stop_loss", DEFAULT_STOP_LOSS_PCT)),
-            help="Emergency sell if price drops this % below buy price."
-        )
+        st.info("ℹ️ Stop-Loss is disabled — bot holds BTC until profit target is reached.")
         st.session_state["cfg_stop_loss"] = cfg_stop_loss
 
     cfg_daily_loss = st.number_input(
@@ -3445,7 +3445,7 @@ with st.expander("⚙️ Auto-Trade Settings", expanded=False):
         lv1, lv2, lv3, lv4 = st.columns(4)
         lv1.metric("Entry Price",  f"₹{entry_now:,.2f}")
         lv2.metric("Sell Target",  f"₹{tgt_price_now:,.2f}",  delta=f"+{cfg_target_pct_now:.2f}%")
-        lv3.metric("Stop-Loss",    f"₹{sl_price_now:,.2f}",   delta=f"-{cfg_stop_loss:.1f}%")
+        lv3.metric("Stop-Loss",    "Disabled",   delta="Holding until target")
         lv4.metric("Current P&L",  f"₹{profit_now_inr:+.2f}", delta=f"{roi_now:+.2f}%")
         st.caption(
             f"Price ₹{price_inr:,.2f} | "

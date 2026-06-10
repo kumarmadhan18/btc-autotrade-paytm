@@ -31,11 +31,35 @@ import hmac
 import hashlib
 import uuid
 import traceback
+import threading
 import requests
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ─────────────────────────────────────────
+# Render Port Binding — keeps Web Service alive
+# Render requires at least one open port even for background workers
+# deployed as Web Services. This tiny HTTP server satisfies that.
+# ─────────────────────────────────────────
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"autotrade_worker running")
+    def log_message(self, *args):
+        pass  # suppress request logs
+
+
+def _start_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    print(f"[health] HTTP server listening on port {port}", flush=True)
+
 
 # ─────────────────────────────────────────
 # Config
@@ -640,8 +664,7 @@ def run_trade_cycle(price_inr: float):
         return
 
     min_trade_inr = max(500.0, round(COINDCX_MIN_BTC_QTY * price_inr * 1.065, 2))
-    target_pct    = DEFAULT_TARGET_PCT
-    stop_loss_pct = DEFAULT_STOP_LOSS_PCT
+    target_pct    = DEFAULT_TARGET_PCT  # sell only when profit target is reached
 
     last_auto      = get_last_auto_trade()
     last_type      = last_auto.get("trade_type", "") if last_auto else ""
@@ -673,17 +696,17 @@ def run_trade_cycle(price_inr: float):
             send_telegram(f"📌 Entry price set to ₹{price_inr:,.2f} — watching for sell target.")
             return
 
-        sell_trigger    = round(entry_price * (1 + target_pct / 100), 2)
-        stop_loss_price = round(entry_price * (1 - stop_loss_pct / 100), 2)
-        profit_now      = (price_inr - entry_price) * btc_balance
+        sell_trigger = round(entry_price * (1 + target_pct / 100), 2)
+        profit_now   = (price_inr - entry_price) * btc_balance
 
-        log(f"📊 Entry ₹{entry_price:,.2f} | Sell@₹{sell_trigger:,.2f} | SL@₹{stop_loss_price:,.2f} | P&L ₹{profit_now:+.2f}")
+        log(f"📊 Entry ₹{entry_price:,.2f} | Sell target ₹{sell_trigger:,.2f} | P&L ₹{profit_now:+.2f} | Now ₹{price_inr:,.2f}")
 
-        if price_inr < sell_trigger and price_inr > stop_loss_price:
-            return  # waiting
+        # NO stop loss — only sell when profit target is reached
+        # Bot will HOLD BTC indefinitely until target is hit (may take days)
+        if price_inr < sell_trigger:
+            return  # waiting for profit target — holding BTC
 
-        sell_reason = "PROFIT_TARGET" if price_inr >= sell_trigger else "STOP_LOSS"
-        log(f"🔔 {sell_reason} triggered — placing SELL of full live BTC balance...")
+        log(f"🔔 PROFIT TARGET reached — placing SELL of full live BTC balance...")
 
         try:
             order = place_sell_order(price_inr)
@@ -708,9 +731,8 @@ def run_trade_cycle(price_inr: float):
         log_inr_transaction("AUTO_SELL", inr_received, new_inr)
         save_trade_log("AUTO_SELL", sold_btc, avg_price, roi_pct)
 
-        icon = "🟢" if sell_reason == "PROFIT_TARGET" else "🛑"
         send_telegram(
-            f"{icon} *AUTO SELL — {sell_reason}*\n"
+            f"🔴 *AUTO SELL — PROFIT TARGET*\n"
             f"  {sold_btc:.6f} BTC → ₹{inr_received:,.2f}\n"
             f"  Entry ₹{entry_price:,.2f} → Exit ₹{avg_price:,.2f}\n"
             f"  Profit: ₹{profit:+.2f} | ROI: {roi_pct:+.2f}%\n"
@@ -777,6 +799,7 @@ def run_trade_cycle(price_inr: float):
 # Main Worker Loop
 # ─────────────────────────────────────────
 def main():
+    _start_health_server()  # bind port for Render
     log("🚀 autotrade_worker.py v2.0 started")
     send_telegram(
         "🤖 *Auto-Trade Worker v2.0 started*\n"
