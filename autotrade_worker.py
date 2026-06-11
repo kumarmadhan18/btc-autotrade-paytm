@@ -40,25 +40,49 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─────────────────────────────────────────
-# Render Port Binding — keeps Web Service alive
-# Render requires at least one open port even for background workers
-# deployed as Web Services. This tiny HTTP server satisfies that.
+# Render Port Binding + UptimeRobot Health Check
 # ─────────────────────────────────────────
+_worker_status = {"running": False, "last_cycle": "Never", "trades": 0}
+
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        status = "running" if _worker_status["running"] else "starting"
+        body = (
+            f"OK\n"
+            f"status: {status}\n"
+            f"last_cycle: {_worker_status['last_cycle']}\n"
+            f"trades: {_worker_status['trades']}\n"
+        ).encode()
         self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b"autotrade_worker running")
+        self.wfile.write(body)
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+
     def log_message(self, *args):
         pass  # suppress request logs
 
 
 def _start_health_server():
-    port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    print(f"[health] HTTP server listening on port {port}", flush=True)
+    port = int(os.getenv("PORT", 10000))
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+            # daemon=True so thread dies with main process (not the other way)
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            print(f"[health] ✅ HTTP server listening on port {port}", flush=True)
+            return
+        except OSError as e:
+            print(f"[health] Attempt {attempt+1}/{max_retries} failed: {e}", flush=True)
+            time.sleep(2)
+    print("[health] ❌ Could not bind port — continuing without health server", flush=True)
 
 
 # ─────────────────────────────────────────
@@ -799,7 +823,6 @@ def run_trade_cycle(price_inr: float):
 # Main Worker Loop
 # ─────────────────────────────────────────
 def main():
-    _start_health_server()  # bind port for Render
     log("🚀 autotrade_worker.py v2.0 started")
     send_telegram(
         "🤖 *Auto-Trade Worker v2.0 started*\n"
@@ -851,6 +874,7 @@ def main():
             # ── Check if trading is active ──────────
             if not get_autotrade_active():
                 log("⏸ Auto-Trade is OFF — waiting...")
+                _worker_status["last_cycle"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 time.sleep(POLL_INTERVAL)
                 consecutive_errors = 0
                 continue
@@ -870,6 +894,7 @@ def main():
 
             try:
                 run_trade_cycle(price)
+                _worker_status["last_cycle"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             finally:
                 release_trade_lock()
 
@@ -892,4 +917,33 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Start health server FIRST — Render needs port binding immediately
+    _start_health_server()
+
+    # Small delay to ensure port is bound before Render scans
+    time.sleep(2)
+
+    # Update status so UptimeRobot health endpoint shows correct state
+    _worker_status["running"]    = True
+    _worker_status["last_cycle"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    log("🚀 autotrade_worker.py v2.0 ready")
+
+    # Keep restarting main() if it ever crashes
+    # Health server stays alive regardless via daemon thread
+    restart_count = 0
+    while True:
+        try:
+            _worker_status["running"] = True
+            main()
+        except Exception as e:
+            restart_count += 1
+            _worker_status["running"] = False
+            log(f"💥 main() crashed (restart #{restart_count}): {e}\n{traceback.format_exc()}")
+            send_telegram(
+                f"🔄 Worker restarting (#{restart_count})\n"
+                f"Error: `{e}`\n"
+                f"Resuming in 10s..."
+            )
+            log("🔄 Restarting main() in 10s...")
+            time.sleep(10)
