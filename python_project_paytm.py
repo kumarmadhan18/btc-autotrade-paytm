@@ -38,7 +38,7 @@
 #     TDS on sell       : 1.0%                   = 1.00%
 #     Total             :                          1.354% breakeven
 #     Recommended min   :                          1.5% target
-#   Stop-Loss: DISABLED — bot holds BTC until profit target is reached (may take days)
+#   Stop-Loss: 2% below entry (configurable in UI settings)
 # ============================================================
 import smtplib
 import requests
@@ -484,6 +484,20 @@ def save_entry_price(price):
         conn.close()
 
 
+def clear_entry_price():
+    conn = get_mysql_connection()
+    if not conn:
+        return
+    try:
+        cursor = get_cursor(conn)
+        cursor.execute("UPDATE trade_state SET entry_price=0 WHERE id=1")
+        conn.commit()
+    except Exception as e:
+        print(f"❌ clear_entry_price error: {e}")
+    finally:
+        conn.close()
+
+
 def get_last_auto_buy_price() -> float:
     """
     Returns the avg_price of the last successful AUTO_BUY from live_trades.
@@ -505,20 +519,9 @@ def get_last_auto_buy_price() -> float:
         conn.close()
 
 
-def clear_entry_price():
+
     conn = get_mysql_connection()
     if not conn:
-        return
-    try:
-        cursor = get_cursor(conn)
-        cursor.execute("UPDATE trade_state SET entry_price=0 WHERE id=1")
-        conn.commit()
-    except Exception as e:
-        print(f"❌ clear_entry_price error: {e}")
-    finally:
-        conn.close()
-
-
         return
     try:
         cursor = get_cursor(conn)
@@ -2477,8 +2480,10 @@ def check_auto_sell(price):
     btc_bal = float(
         st.session_state.get("BTC_WALLET", {}).get("balance", BTC_WALLET.get("balance", 0.0))
     )
-    # Legacy absolute stop loss DISABLED — see check_auto_trading() for sell logic
-    if False and price < STOP_LOSS_THRESHOLD and btc_bal > 0:
+    if price < STOP_LOSS_THRESHOLD and btc_bal > 0:
+        msg = f"🔥 PRICE STOP-LOSS @ ₹{price:,.2f}! Auto-selling all BTC..."
+        st.error(msg)
+        send_telegram(msg)
 
         if is_live():
             # FIX: Place the actual SELL order on CoinDCX
@@ -2617,7 +2622,7 @@ def check_auto_trading(price_inr: float):
             return
 
         # ── Settings ─────────────────────────────────────────────
-        # stop_loss_pct removed — no stop loss, bot holds until profit target only
+        # stop_loss_pct DISABLED — no stop loss, bot holds until profit target only
         target_pct    = float(st.session_state.get("cfg_target_pct", 1.5))   # % move to trigger sell/buy (min 1.5% after TDS+GST+fees)
 
         # ── Last auto trade from DB ──────────────────────────────
@@ -2652,13 +2657,14 @@ def check_auto_trading(price_inr: float):
             if btc_balance > 0 and entry_price > 0:
                 profit_now = (price_inr - entry_price) * btc_balance
                 sell_at    = round(entry_price * (1 + target_pct / 100), 2)
-                sl_at      = round(entry_price * (1 - stop_loss_pct / 100), 2)
+                sl_at      = 0  # stop loss disabled
                 tag        = "🔔 State Update" if _state_changed else "⏰ 2h Heartbeat"
                 send_telegram(
                     f"{tag}\n"
                     f"🔄 Holding {btc_balance:.6f} BTC\n"
                     f"  Bought @ ₹{entry_price:,.2f} | Now ₹{price_inr:,.2f}\n"
                     f"  P&L: ₹{profit_now:+.2f} | Sell at ₹{sell_at:,.2f} (+{target_pct:.2f}%)\n"
+                    f"  No stop-loss — holding until profit target"
                 )
             elif inr_balance >= min_trade_inr and last_type == "AUTO_SELL" and last_inr_value > 0:
                 buy_at = round(last_inr_value * (1 - target_pct / 100), 2)
@@ -2678,14 +2684,16 @@ def check_auto_trading(price_inr: float):
 
         # ╔══════════════════════════════════════════════════════╗
         # ║  STATE A — Have BTC                                  ║
-        # ║  Sell ONLY when price ≥ entry × (1 + target_pct%)    ║
-        # ║  NO stop-loss — bot holds BTC until profit target    ║
-        # ║  This may take hours, days or weeks — that's OK      ║
+        # ║  Sell when price ≥ entry × (1 + target_pct%)         ║
+        # ║  Stop-Loss if price ≤ entry × (1 - stop_loss%)       ║
+        # ║  Always evaluate sell when BTC > 0, regardless INR   ║
         # ╚══════════════════════════════════════════════════════╝
         if btc_balance > 0:
 
             # If no entry price AND last trade was a BUY (not a SELL),
             # seed entry from current price so ROI tracking starts now.
+            # Skip if last trade was AUTO_SELL — BTC balance is stale
+            # from session_state and will clear on next DB read.
             if entry_price == 0 and last_type != "AUTO_SELL":
                 save_entry_price(price_inr)
                 entry_price = price_inr
@@ -2698,8 +2706,7 @@ def check_auto_trading(price_inr: float):
             sell_trigger  = round(entry_price * (1 + target_pct / 100), 2)
             actual_profit = (price_inr - entry_price) * btc_balance
 
-            # NO stop loss — only sell when profit target is reached
-            # Bot will hold BTC indefinitely until target is hit
+            # NO stop loss — hold BTC until profit target only (may take days)
             if price_inr < sell_trigger:
                 return  # holding — waiting for profit target
 
@@ -3417,7 +3424,6 @@ with st.expander("⚙️ Auto-Trade Settings", expanded=False):
 
     with sl_col2:
         st.info("ℹ️ Stop-Loss is disabled — bot holds BTC until profit target is reached.")
-        st.session_state["cfg_stop_loss"] = cfg_stop_loss
 
     cfg_daily_loss = st.number_input(
         "📅 Daily Loss Limit (%)", min_value=0.5, max_value=50.0, step=0.5,
@@ -3432,7 +3438,7 @@ with st.expander("⚙️ Auto-Trade Settings", expanded=False):
         btc_bal_now, _     = get_last_wallet_balance(mode="LIVE" if is_live() else "TEST")
         btc_bal_now        = float(btc_bal_now or 0)
         roi_now            = ((price_inr - entry_now) / entry_now) * 100
-        sl_price_now       = round(entry_now * (1 - cfg_stop_loss / 100), 2)
+        sl_price_now       = 0  # stop loss disabled
         tgt_price_now      = round(entry_now * (1 + cfg_target_pct_now / 100), 2)
         profit_now_inr     = (price_inr - entry_now) * btc_bal_now if btc_bal_now > 0 else 0
         profit_at_target   = (tgt_price_now - entry_now) * btc_bal_now if btc_bal_now > 0 else 0
