@@ -109,6 +109,11 @@ DEFAULT_DAILY_LOSS_LIMIT = 5.0
 # Telegram update offset — tracks last processed message
 _tg_offset = 0
 
+# Heartbeat tracking — sends status update on state change or every 2 hours
+_last_tg_state = ""
+_last_tg_time  = 0.0
+HEARTBEAT_INTERVAL = 7200  # 2 hours
+
 
 # ─────────────────────────────────────────
 # Logging
@@ -672,9 +677,55 @@ def save_trade_log(trade_type, btc_amount, price_inr, roi=0):
         conn.close()
 
 
-# ─────────────────────────────────────────
-# Core Trade Cycle
-# ─────────────────────────────────────────
+def _send_heartbeat(btc_balance, inr_balance, entry_price, price_inr,
+                     target_pct, min_trade_inr, last_type, last_inr_value):
+    """
+    Sends a Telegram status update when:
+      1. Trade state changes (BTC↔INR / entry price changes) — immediately
+      2. Every HEARTBEAT_INTERVAL seconds (2h) as a "still alive" ping
+    Mirrors the Streamlit heartbeat behaviour for the worker process.
+    """
+    global _last_tg_state, _last_tg_time
+
+    cur_state      = f"{'BTC' if btc_balance > 0 else 'INR'}_{entry_price}"
+    state_changed  = cur_state != _last_tg_state
+    heartbeat_due  = (time.time() - _last_tg_time) >= HEARTBEAT_INTERVAL
+
+    if not (state_changed or heartbeat_due):
+        return
+
+    _last_tg_state = cur_state
+    _last_tg_time  = time.time()
+    tag = "🔔 State Update" if state_changed else "⏰ 2h Heartbeat"
+
+    if btc_balance >= COINDCX_MIN_BTC_QTY and entry_price > 0:
+        profit_now = (price_inr - entry_price) * btc_balance
+        sell_at    = round(entry_price * (1 + target_pct / 100), 2)
+        send_telegram(
+            f"{tag}\n"
+            f"🔄 Holding {btc_balance:.6f} BTC\n"
+            f"  Bought @ ₹{entry_price:,.2f} | Now ₹{price_inr:,.2f}\n"
+            f"  P&L: ₹{profit_now:+.2f} | Sell at ₹{sell_at:,.2f} (+{target_pct:.2f}%)\n"
+            f"  No stop-loss — holding until profit target"
+        )
+    elif inr_balance >= min_trade_inr and last_type == "AUTO_SELL" and last_inr_value > 0:
+        buy_at = round(last_inr_value * (1 - target_pct / 100), 2)
+        send_telegram(
+            f"{tag}\n"
+            f"🔄 Holding ₹{inr_balance:,.2f} INR\n"
+            f"  Last sell @ ₹{last_inr_value:,.2f} | Now ₹{price_inr:,.2f}\n"
+            f"  Buy when price ≤ ₹{buy_at:,.2f} (-{target_pct:.2f}%)"
+        )
+    else:
+        send_telegram(
+            f"{tag}\n"
+            f"🔄 Auto-Trade active\n"
+            f"  BTC: {btc_balance:.6f} | INR: ₹{inr_balance:,.2f}\n"
+            f"  Price: ₹{price_inr:,.2f} | Last: {last_type or 'none'}"
+        )
+
+
+
 def run_trade_cycle(price_inr: float):
     mode        = "LIVE" if REAL_TRADING else "TEST"
     inr_balance = get_current_inr_balance()
@@ -728,6 +779,8 @@ def run_trade_cycle(price_inr: float):
         # NO stop loss — only sell when profit target is reached
         # Bot will HOLD BTC indefinitely until target is hit (may take days)
         if price_inr < sell_trigger:
+            _send_heartbeat(btc_balance, inr_balance, entry_price, price_inr,
+                            target_pct, min_trade_inr, last_type, last_inr_value)
             return  # waiting for profit target — holding BTC
 
         log(f"🔔 PROFIT TARGET reached — placing SELL of full live BTC balance...")
@@ -786,6 +839,8 @@ def run_trade_cycle(price_inr: float):
             buy_reason = "REBUY"
 
         if not should_buy:
+            _send_heartbeat(btc_balance, inr_balance, entry_price, price_inr,
+                            target_pct, min_trade_inr, last_type, last_inr_value)
             return
 
         log(f"🔔 {buy_reason} — placing BUY with ₹{inr_balance:,.2f}...")
