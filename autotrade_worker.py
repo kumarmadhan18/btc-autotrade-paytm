@@ -253,32 +253,43 @@ def get_market_price(symbol="BTCINR") -> float | None:
     return None
 
 
-def _fetch_coindcx_balances() -> dict:
-    try:
-        timestamp_ms = str(int(time.time() * 1000))
-        body = json.dumps({"timestamp": timestamp_ms}, separators=(",", ":"))
-        signature = hmac.new(
-            API_SECRET.encode("utf-8"),
-            body.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-        headers = {
-            "Content-Type":     "application/json",
-            "X-AUTH-APIKEY":    API_KEY,
-            "X-AUTH-SIGNATURE": signature,
-        }
-        resp = requests.post(
-            f"{BASE_URL}/exchange/v1/users/balances",
-            data=body, headers=headers, timeout=10
-        )
-        resp.raise_for_status()
-        return {
-            item.get("currency", "").upper(): float(item.get("balance", 0.0))
-            for item in resp.json() if item.get("currency")
-        }
-    except Exception as e:
-        log(f"❌ Balance fetch failed: {e}")
-        return {}
+def _fetch_coindcx_balances(retries: int = 3) -> dict | None:
+    """
+    Returns dict of balances on success, or None if ALL retries failed.
+    None != {} — None means "API call failed, don't trust this",
+    {} or balances with 0 means "API succeeded, balance really is 0".
+    """
+    last_err = None
+    for attempt in range(retries):
+        try:
+            timestamp_ms = str(int(time.time() * 1000))
+            body = json.dumps({"timestamp": timestamp_ms}, separators=(",", ":"))
+            signature = hmac.new(
+                API_SECRET.encode("utf-8"),
+                body.encode("utf-8"),
+                hashlib.sha256
+            ).hexdigest()
+            headers = {
+                "Content-Type":     "application/json",
+                "X-AUTH-APIKEY":    API_KEY,
+                "X-AUTH-SIGNATURE": signature,
+            }
+            resp = requests.post(
+                f"{BASE_URL}/exchange/v1/users/balances",
+                data=body, headers=headers, timeout=10
+            )
+            resp.raise_for_status()
+            return {
+                item.get("currency", "").upper(): float(item.get("balance", 0.0))
+                for item in resp.json() if item.get("currency")
+            }
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(2)  # brief pause before retry
+
+    log(f"❌ Balance fetch failed after {retries} attempts: {last_err}")
+    return None
 
 
 def _cancel_order(order_id: str):
@@ -382,14 +393,14 @@ def _execute_order(side: str, qty: float, spot_price: float) -> dict:
 
 def place_buy_order(inr_balance: float, spot_price: float) -> dict:
     """
-    BUY: always uses live INR balance with 2% fee buffer.
-    Validates minimum qty and notional before placing.
+    BUY: uses the live INR balance already fetched this cycle by run_trade_cycle
+    (passed in as inr_balance) — does NOT re-fetch, avoiding a second API call
+    that could transiently fail and produce a misleading "no funds" error.
     """
-    live_inr = get_current_inr_balance()
-    if live_inr <= 0:
-        raise ValueError(f"INR balance ₹{live_inr:.2f} — nothing to buy with.")
+    if inr_balance <= 0:
+        raise ValueError(f"INR balance ₹{inr_balance:.2f} — nothing to buy with.")
 
-    usable_inr  = min(inr_balance, live_inr) * 0.98
+    usable_inr  = inr_balance * 0.98
     limit_price = int(spot_price)
     btc_qty     = math.floor((usable_inr / limit_price) / 0.00001) * 0.00001
     btc_qty     = round(btc_qty, 6)
@@ -397,7 +408,7 @@ def place_buy_order(inr_balance: float, spot_price: float) -> dict:
     if btc_qty <= COINDCX_MIN_BTC_QTY:
         raise ValueError(
             f"BTC qty {btc_qty:.6f} at/below minimum {COINDCX_MIN_BTC_QTY}. "
-            f"INR balance ₹{live_inr:.2f} is too low."
+            f"INR balance ₹{inr_balance:.2f} is too low."
         )
 
     notional = btc_qty * spot_price
@@ -412,21 +423,25 @@ def place_buy_order(inr_balance: float, spot_price: float) -> dict:
     return result
 
 
-def place_sell_order(spot_price: float) -> dict:
+def place_sell_order(btc_balance: float, spot_price: float) -> dict:
     """
-    SELL: always uses live BTC balance from CoinDCX API.
-    Validates minimum qty and notional before placing.
+    SELL: uses the live BTC balance already fetched this cycle by run_trade_cycle
+    (passed in as btc_balance) — does NOT re-fetch, avoiding a second API call
+    that could transiently fail and produce a misleading "no funds" error.
     """
-    live_btc = get_current_btc_balance()
-    if live_btc <= 0:
-        raise ValueError(f"BTC balance {live_btc:.8f} — nothing to sell.")
+    if btc_balance <= 0:
+        raise ValueError(f"BTC balance {btc_balance:.8f} — nothing to sell.")
 
-    btc_qty  = math.floor(live_btc / 0.000001) * 0.000001
-    btc_qty  = round(btc_qty, 6)
+    btc_qty = math.floor(btc_balance / 0.000001) * 0.000001
+    btc_qty = round(btc_qty, 6)
 
-    if btc_qty < COINDCX_MIN_BTC_QTY:
+    # Use <= (not <) — CoinDCX rejects orders exactly AT the minimum boundary.
+    # Raising ValueError here (not HTTPError) lets run_trade_cycle skip cleanly
+    # instead of counting it as a worker error.
+    if btc_qty <= COINDCX_MIN_BTC_QTY:
         raise ValueError(
-            f"BTC balance {live_btc:.6f} below minimum {COINDCX_MIN_BTC_QTY}."
+            f"BTC balance {btc_balance:.6f} at/below minimum {COINDCX_MIN_BTC_QTY}. "
+            f"Cannot sell yet — holding."
         )
 
     notional = btc_qty * spot_price
@@ -549,7 +564,12 @@ def clear_entry_price():
 
 
 def get_last_auto_buy_price() -> float:
-    """Recover entry_price from last successful AUTO_BUY after restart."""
+    """
+    Recover entry_price from last successful BUY after restart.
+    Checks both 'BUY' (written by Streamlit bot's _log_live_trade)
+    and 'AUTO_BUY' (written by this worker's save_trade_log) —
+    the shared live_trades table can contain rows from either process.
+    """
     conn = get_db()
     if not conn:
         return 0.0
@@ -557,7 +577,7 @@ def get_last_auto_buy_price() -> float:
         cur = get_cursor(conn)
         cur.execute("""
             SELECT price FROM live_trades
-            WHERE action = 'BUY' AND status IN ('filled','partially_filled')
+            WHERE action IN ('BUY', 'AUTO_BUY') AND status IN ('filled','partially_filled')
             ORDER BY trade_time DESC LIMIT 1
         """)
         row = cur.fetchone()
@@ -593,7 +613,8 @@ def get_last_auto_trade() -> dict | None:
 
 def get_current_inr_balance() -> float:
     if REAL_TRADING:
-        return float(_fetch_coindcx_balances().get("INR", 0.0))
+        balances = _fetch_coindcx_balances()
+        return float((balances or {}).get("INR", 0.0))
     conn = get_db()
     if not conn:
         return 0.0
@@ -608,7 +629,8 @@ def get_current_inr_balance() -> float:
 
 def get_current_btc_balance() -> float:
     if REAL_TRADING:
-        return float(_fetch_coindcx_balances().get("BTC", 0.0))
+        balances = _fetch_coindcx_balances()
+        return float((balances or {}).get("BTC", 0.0))
     conn = get_db()
     if not conn:
         return 0.0
@@ -623,6 +645,23 @@ def get_current_btc_balance() -> float:
         return float(row["balance_after"]) if row and row["balance_after"] else 0.0
     finally:
         conn.close()
+
+
+def get_live_balances() -> tuple[float, float, bool]:
+    """
+    Returns (inr_balance, btc_balance, fetch_succeeded).
+    Single combined API call — used by run_trade_cycle to avoid
+    making two separate calls (and two chances for transient failure).
+    fetch_succeeded=False means the API call failed — caller should
+    SKIP the cycle, never treat as "balance is zero".
+    """
+    if not REAL_TRADING:
+        return get_current_inr_balance(), get_current_btc_balance(), True
+
+    balances = _fetch_coindcx_balances()
+    if balances is None:
+        return 0.0, 0.0, False
+    return float(balances.get("INR", 0.0)), float(balances.get("BTC", 0.0)), True
 
 
 def log_wallet_transaction(action, amount, balance, price_inr, trade_type):
@@ -727,15 +766,20 @@ def _send_heartbeat(btc_balance, inr_balance, entry_price, price_inr,
 
 
 def run_trade_cycle(price_inr: float):
-    mode        = "LIVE" if REAL_TRADING else "TEST"
-    inr_balance = get_current_inr_balance()
-    btc_balance = get_current_btc_balance()
+    mode = "LIVE" if REAL_TRADING else "TEST"
+
+    # Single combined balance fetch — distinguishes API failure from real zero
+    inr_balance, btc_balance, fetch_ok = get_live_balances()
+
+    if not fetch_ok:
+        log("⚠️ Balance fetch failed after retries — skipping this cycle (NOT pausing).")
+        return  # transient API issue — just skip, try again next cycle
 
     log(f"💰 INR ₹{inr_balance:,.2f} | BTC {btc_balance:.6f} | Price ₹{price_inr:,.2f}")
 
     if btc_balance == 0 and inr_balance == 0:
-        set_autotrade_active(False, "Both balances zero.")
-        send_telegram("⚠️ Auto-Trade paused — both INR and BTC balances are zero. Deposit funds to resume.")
+        set_autotrade_active(False, "Both balances confirmed zero (fetch succeeded).")
+        send_telegram("⚠️ Auto-Trade paused — INR and BTC balances are both ₹0 / 0 BTC (confirmed via API). Deposit funds and send /start to resume.")
         return
 
     min_trade_inr = max(500.0, round(COINDCX_MIN_BTC_QTY * price_inr * 1.065, 2))
@@ -786,7 +830,7 @@ def run_trade_cycle(price_inr: float):
         log(f"🔔 PROFIT TARGET reached — placing SELL of full live BTC balance...")
 
         try:
-            order = place_sell_order(price_inr)
+            order = place_sell_order(btc_balance, price_inr)
         except ValueError as e:
             log(f"⚠️ SELL skipped: {e}")
             send_telegram(f"⚠️ SELL skipped: {e}")
@@ -802,14 +846,18 @@ def run_trade_cycle(price_inr: float):
         inr_received = (sold_btc * avg_price) - fee
         profit       = inr_received - (entry_price * sold_btc)
         roi_pct      = ((avg_price - entry_price) / entry_price) * 100
-        new_inr      = get_current_inr_balance()
+
+        # Fetch updated balance for logging — fall back to estimate if API hiccups
+        _new_inr, _new_btc, _new_ok = get_live_balances()
+        new_inr = _new_inr if _new_ok else (inr_balance + inr_received)
 
         log_wallet_transaction("AUTO_SELL", sold_btc, 0, avg_price, "AUTO_SELL")
         log_inr_transaction("AUTO_SELL", inr_received, new_inr)
         save_trade_log("AUTO_SELL", sold_btc, avg_price, roi_pct)
+        _worker_status["trades"] += 1
 
         send_telegram(
-            f"🔴 *AUTO SELL — PROFIT TARGET*\n"
+            f"🟢 *AUTO SELL — PROFIT TARGET*\n"
             f"  {sold_btc:.6f} BTC → ₹{inr_received:,.2f}\n"
             f"  Entry ₹{entry_price:,.2f} → Exit ₹{avg_price:,.2f}\n"
             f"  Profit: ₹{profit:+.2f} | ROI: {roi_pct:+.2f}%\n"
@@ -859,11 +907,16 @@ def run_trade_cycle(price_inr: float):
         avg_price = order["avg_price"]
         btc_got   = order["filled_qty"]
         fee       = order["fee"]
-        new_inr   = get_current_inr_balance()
+        cost      = (avg_price * btc_got) + fee  # fee is INR-denominated, charged on top
+
+        # Fetch updated balance for logging — fall back to estimate if API hiccups
+        _new_inr, _new_btc, _new_ok = get_live_balances()
+        new_inr = _new_inr if _new_ok else max(0.0, inr_balance - cost)
 
         log_wallet_transaction("AUTO_BUY", btc_got, btc_got, avg_price, "AUTO_BUY")
         log_inr_transaction("AUTO_BUY", -inr_balance, new_inr)
         save_trade_log("AUTO_BUY", btc_got, avg_price)
+        _worker_status["trades"] += 1
 
         send_telegram(
             f"🟢 *AUTO BUY — {buy_reason}*\n"
@@ -905,25 +958,22 @@ def main():
                 log("▶️ Resumed via Telegram /start")
 
             elif cmd == "status":
-                active      = get_autotrade_active()
-                price       = get_market_price("BTCINR") or 0
-                inr_bal     = get_current_inr_balance()
-                btc_bal     = get_current_btc_balance()
-                entry       = get_entry_price()
-                status_icon = "▶️ ACTIVE" if active else "⏸ PAUSED"
+                active        = get_autotrade_active()
+                price         = get_market_price("BTCINR") or 0
+                inr_bal, btc_bal, bal_ok = get_live_balances()
+                entry         = get_entry_price()
+                status_icon   = "▶️ ACTIVE" if active else "⏸ PAUSED"
+                entry_line    = f"₹{entry:,.2f}" if entry else "Not set"
+                balance_note  = "" if bal_ok else "\n  ⚠️ Balance fetch failed — showing 0"
                 send_telegram(
                     f"📊 *Worker Status*\n"
                     f"  Trading: {status_icon}\n"
                     f"  BTC Price: ₹{price:,.2f}\n"
                     f"  INR Balance: ₹{inr_bal:,.2f}\n"
                     f"  BTC Balance: {btc_bal:.6f}\n"
-                    f"  Entry Price: ₹{entry:,.2f}" if entry else
-                    f"📊 *Worker Status*\n"
-                    f"  Trading: {status_icon}\n"
-                    f"  BTC Price: ₹{price:,.2f}\n"
-                    f"  INR Balance: ₹{inr_bal:,.2f}\n"
-                    f"  BTC Balance: {btc_bal:.6f}\n"
-                    f"  Entry Price: Not set"
+                    f"  Entry Price: {entry_line}\n"
+                    f"  Trades this run: {_worker_status['trades']}"
+                    f"{balance_note}"
                 )
 
             # ── Check if trading is active ──────────
