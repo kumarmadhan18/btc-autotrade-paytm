@@ -3557,21 +3557,43 @@ if is_live():
     st.image(Image.open(buf), caption="Scan to Deposit BTC")
 
     st.subheader("📤 Withdraw BTC")
-    if BTC_WALLET['balance'] > 0:
-        with st.form("btc_withdraw_form", clear_on_submit=False):
+    btc_bal_now = float(BTC_WALLET.get('balance', 0))
+    if btc_bal_now > 0:
+        # min_value must always be <= max_value — use the lesser of 0.0001 or full balance
+        min_btc_withdraw = min(0.0001, btc_bal_now)
+        with st.form("btc_withdraw_form", clear_on_submit=True):
             withdraw_address = st.text_input("Destination BTC Address")
-            withdraw_amount  = st.number_input("Amount (BTC)", min_value=0.0001,
-                                               max_value=BTC_WALLET['balance'],
-                                               step=0.0001, format="%.8f")
-            if st.form_submit_button("Submit Withdrawal"):
-                try:
-                    tx = wallet.send_to(address=withdraw_address, amount=withdraw_amount, network='bitcoin')
-                    st.success(f"✅ TX ID: {tx.txid}")
-                    BTC_WALLET['balance'] -= withdraw_amount
-                    log_wallet_transaction("REAL_WITHDRAW", withdraw_amount, BTC_WALLET['balance'],
-                                           price_inr or 0, "REAL_WITHDRAW")
-                except Exception as e:
-                    st.error(f"❌ Withdrawal failed: {e}")
+            withdraw_amount  = st.number_input(
+                "Amount (BTC)",
+                min_value=min_btc_withdraw,
+                max_value=btc_bal_now,
+                value=min_btc_withdraw,
+                step=0.00001,
+                format="%.6f"
+            )
+            submitted = st.form_submit_button("📤 Submit Withdrawal")
+            if submitted:
+                if not withdraw_address.strip():
+                    st.error("❌ Please enter a destination BTC address.")
+                elif withdraw_amount <= 0:
+                    st.error("❌ Withdrawal amount must be greater than 0.")
+                elif withdraw_amount > btc_bal_now:
+                    st.error(f"❌ Amount exceeds balance ({btc_bal_now:.6f} BTC).")
+                else:
+                    try:
+                        tx = wallet.send_to(
+                            address=withdraw_address.strip(),
+                            amount=withdraw_amount,
+                            network='bitcoin'
+                        )
+                        st.success(f"✅ TX ID: {tx.txid}")
+                        BTC_WALLET['balance'] = btc_bal_now - withdraw_amount
+                        log_wallet_transaction(
+                            "REAL_WITHDRAW", withdraw_amount, BTC_WALLET['balance'],
+                            price_inr or 0, "REAL_WITHDRAW"
+                        )
+                    except Exception as e:
+                        st.error(f"❌ Withdrawal failed: {e}")
     else:
         st.warning("⚠️ BTC balance is 0 — Withdrawal not allowed.")
 
