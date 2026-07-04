@@ -190,35 +190,65 @@ def send_telegram(msg: str):
         log(f"⚠️ Telegram send failed: {e}")
 
 
-def poll_telegram_commands() -> str | None:
+def poll_telegram_commands() -> list:
     """
-    Polls Telegram for commands.
-    Returns: "stop", "start", "status", or None.
-    Worker NEVER exits on /stop — only pauses trading.
+    Polls Telegram getUpdates and returns ALL valid commands received since
+    the last poll, in order. Each command is: "stop", "start", or "status".
+
+    Fixes:
+      - Returns a LIST so no command is ever dropped (old code kept only last)
+      - Filters by CHAT_ID so only your messages are acted on
+      - Handles /start@BotName style (Telegram appends bot username in groups)
+      - Advances offset for every update so unknown messages never block queue
+      - Silently skips non-message updates (edited_message, channel_post, etc.)
     """
     global _tg_offset
     if not BOT_TOKEN or not CHAT_ID:
-        return None
+        return []
     try:
         r = requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-            params={"offset": _tg_offset, "timeout": 2, "limit": 10},
-            timeout=5
+            params={"offset": _tg_offset, "timeout": 2, "limit": 20},
+            timeout=8
         )
-        updates = r.json().get("result", [])
-        command = None
+        if not r.ok:
+            log(f"Warning: Telegram getUpdates HTTP {r.status_code}")
+            return []
+
+        updates  = r.json().get("result", [])
+        commands = []
+
         for update in updates:
-            _tg_offset = update["update_id"] + 1
-            txt = update.get("message", {}).get("text", "").strip().lower()
-            if txt in ("/stop", "stop"):
-                command = "stop"
-            elif txt in ("/start", "start"):
-                command = "start"
-            elif txt in ("/status", "status"):
-                command = "status"
-        return command
-    except Exception:
-        return None
+            _tg_offset = update["update_id"] + 1   # always advance even non-commands
+
+            msg = update.get("message") or update.get("edited_message")
+            if not msg:
+                continue
+
+            # Only respond to your own chat — ignore all other senders
+            chat_id = str(msg.get("chat", {}).get("id", ""))
+            if chat_id != str(CHAT_ID):
+                continue
+
+            raw = msg.get("text", "").strip()
+            if not raw:
+                continue
+
+            # Strip /command@BotUsername suffix Telegram adds in groups
+            cmd_part = raw.split()[0].split("@")[0].lower()
+
+            if cmd_part in ("/stop", "stop"):
+                commands.append("stop")
+            elif cmd_part in ("/start", "start"):
+                commands.append("start")
+            elif cmd_part in ("/status", "status"):
+                commands.append("status")
+
+        return commands
+
+    except Exception as e:
+        log(f"Warning: Telegram poll error: {e}")
+        return []
 
 
 # ─────────────────────────────────────────
@@ -459,23 +489,35 @@ def place_sell_order(btc_qty_to_sell: float, spot_price: float) -> dict:
 # DB Helpers
 # ─────────────────────────────────────────
 def get_autotrade_active() -> bool:
+    """
+    Reads autotrade_active flag directly from trade_state (id=1).
+    Previously read from wallet_transactions which is also written by
+    AUTO_BUY/AUTO_SELL rows — causing the bot to pause itself silently
+    after every trade. trade_state is the single source of truth.
+    """
     conn = get_db()
     if not conn:
         return False
     try:
         cur = get_cursor(conn)
-        cur.execute("""
-            SELECT trade_type FROM wallet_transactions
-            WHERE trade_type IN ('AUTO_TRADE_START','AUTO_TRADE_STOP')
-            ORDER BY trade_time DESC LIMIT 1
-        """)
+        cur.execute("SELECT autotrade_active FROM trade_state WHERE id=1")
         row = cur.fetchone()
-        return bool(row and row.get("trade_type") == "AUTO_TRADE_START")
+        if not row:
+            return False
+        val = row.get("autotrade_active")
+        return bool(val) if val is not None else False
+    except Exception as e:
+        log(f"Warning: get_autotrade_active error: {e}")
+        return False
     finally:
         conn.close()
 
 
 def set_autotrade_active(active: bool, reason: str = ""):
+    """
+    Writes autotrade_active to trade_state (id=1) AND logs a history
+    row to wallet_transactions for audit trail.
+    """
     conn = get_db()
     if not conn:
         return
@@ -483,6 +525,10 @@ def set_autotrade_active(active: bool, reason: str = ""):
     trade_type = "AUTO_TRADE_START" if active else "AUTO_TRADE_STOP"
     try:
         cur = get_cursor(conn)
+        cur.execute(
+            "UPDATE trade_state SET autotrade_active=%s WHERE id=1",
+            (active,)
+        )
         cur.execute("""
             INSERT INTO wallet_transactions
             (trade_time, action, amount, balance_after, inr_value,
@@ -490,7 +536,10 @@ def set_autotrade_active(active: bool, reason: str = ""):
             VALUES (NOW(), %s, 0, 0, 0, %s, %s, 'SUCCESS', %s)
         """, (trade_type, trade_type, active, mode))
         conn.commit()
-        log(f"{'▶️' if active else '⏸'} Auto-Trade {'started' if active else 'paused'} in DB. {reason}")
+        icon = "ON" if active else "OFF"
+        log(f"Auto-Trade {icon} written to DB. {reason}")
+    except Exception as e:
+        log(f"Error: set_autotrade_active failed: {e}")
     finally:
         conn.close()
 
@@ -969,16 +1018,18 @@ def run_trade_cycle(price_inr: float):
         save_dca_state(sell_stage=new_sell_stage, last_sell_price_btc=new_last_sell_px)
 
         if new_sell_stage >= len(SELL_STAGES):
+            # All 3 stages sold — safe to fully reset now
             clear_entry_price()
             reset_dca_state()
             save_dca_state(last_sell_price_btc=avg_price)   # keep for next buy dip ref
-            completion = "✅ All 3 sell stages complete — watching for next buy dip"
+            completion = "All 3 sell stages complete - watching for next buy dip"
         else:
-            clear_entry_price()
+            # Partial sell done — do NOT clear entry_price here.
+            # avg_buy must survive restart so S2/S3 sell targets stay correct.
             remaining_pct = sum(p for _, p in SELL_STAGES[new_sell_stage:])
             next_s        = SELL_STAGES[new_sell_stage]
             next_trigger  = round(avg_price * (1 + next_s[0] / 100), 2)
-            completion    = (f"Next S{new_sell_stage+1} @ ₹{next_trigger:,.2f} "
+            completion    = (f"Next S{new_sell_stage+1} @ Rs {next_trigger:,.2f} "
                              f"(+{next_s[0]}% from S1) | {int(remaining_pct*100)}% BTC remaining")
 
         send_telegram(
@@ -1133,55 +1184,90 @@ def run_trade_cycle(price_inr: float):
 def main():
     log("🚀 autotrade_worker.py v2.0 started")
     send_telegram(
-        "🤖 *Auto-Trade Worker v2.1 started — DCA Strategy*\n"
-        "Buy stages:  B1 -3% (10%) | B2 -6% (25%) | B3 -9% (50%) | Reserve 15%\n"
-        "Sell stages: S1 +3% (25%) | S2 +6% (35%) | S3 +9% (40%)\n"
-        "Commands:\n"
-        "  /stop → pause trading\n"
-        "  /start → resume trading\n"
-        "  /status → check status + DCA stages"
+        "Auto-Trade Worker v2.1 started - DCA Strategy\n"
+        "BUY:  B1=immediate(10%) | B2=-3%(25%) | B3=-6%(50%) | Reserve 15%\n"
+        "SELL: S1=immediate(25%) | S2=+3%(35%) | S3=+6%(40%)\n"
+        "B2/B3 dip from B1 price | S2/S3 rise from S1 price\n"
+        "Commands: /stop | /start | /status"
     )
 
     consecutive_errors = 0
 
     while True:   # ← NEVER exits — only pauses on /stop
         try:
-            # ── Telegram commands ──────────────────
-            cmd = poll_telegram_commands()
+            # ── Telegram commands ──────────────────────────────────────────
+            # Process ALL commands received since last poll (returns a list).
+            # This ensures /status is never silently dropped behind /stop or /start.
+            for cmd in poll_telegram_commands():
 
-            if cmd == "stop":
-                set_autotrade_active(False, "Telegram /stop")
-                send_telegram("⏸ Auto-Trade *PAUSED* via Telegram.\nSend /start to resume.")
-                log("⏸ Paused via Telegram /stop")
+                if cmd == "stop":
+                    set_autotrade_active(False, "Telegram /stop")
+                    send_telegram("⏸ Auto-Trade *PAUSED* via Telegram.\nSend /start to resume.")
+                    log("⏸ Paused via Telegram /stop")
 
-            elif cmd == "start":
-                set_autotrade_active(True, "Telegram /start")
-                send_telegram("▶️ Auto-Trade *RESUMED* via Telegram.")
-                log("▶️ Resumed via Telegram /start")
+                elif cmd == "start":
+                    set_autotrade_active(True, "Telegram /start")
+                    send_telegram("▶️ Auto-Trade *RESUMED* via Telegram.")
+                    log("▶️ Resumed via Telegram /start")
 
-            elif cmd == "status":
-                active        = get_autotrade_active()
-                price         = get_market_price("BTCINR") or 0
-                inr_bal, btc_bal, bal_ok = get_live_balances()
-                entry         = get_entry_price()
-                dca           = get_dca_state()
-                status_icon   = "▶️ ACTIVE" if active else "⏸ PAUSED"
-                entry_line    = f"₹{entry:,.2f}" if entry else "Not set"
-                avg_line      = f"₹{dca['avg_buy_price']:,.2f}" if dca['avg_buy_price'] else "Not set"
-                balance_note  = "" if bal_ok else "\n  ⚠️ Balance fetch failed — showing 0"
-                send_telegram(
-                    f"📊 *Worker Status*\n"
-                    f"  Trading: {status_icon}\n"
-                    f"  BTC Price: ₹{price:,.2f}\n"
-                    f"  INR Balance: ₹{inr_bal:,.2f}\n"
-                    f"  BTC Balance: {btc_bal:.6f}\n"
-                    f"  Entry Price: {entry_line}\n"
-                    f"  Avg Buy Price: {avg_line}\n"
-                    f"  Buy stage: {dca['buy_stage']}/3 | Sell stage: {dca['sell_stage']}/3\n"
-                    f"  Last sell ref: ₹{dca['last_sell_price_btc']:,.2f}\n"
-                    f"  Trades this run: {_worker_status['trades']}"
-                    f"{balance_note}"
-                )
+                elif cmd == "status":
+                    try:
+                        active       = get_autotrade_active()
+                        price        = get_market_price("BTCINR") or 0
+                        inr_bal, btc_bal, bal_ok = get_live_balances()
+                        entry        = get_entry_price()
+                        dca          = get_dca_state()
+                        status_icon  = "ACTIVE" if active else "PAUSED"
+                        entry_line   = f"Rs {entry:,.2f}" if entry else "Not set"
+                        avg_line     = f"Rs {dca['avg_buy_price']:,.2f}" if dca['avg_buy_price'] else "Not set"
+                        last_sell    = dca['last_sell_price_btc']
+                        last_sell_ln = f"Rs {last_sell:,.2f}" if last_sell else "None"
+                        balance_note = "" if bal_ok else "\nWarning: Balance fetch failed"
+
+                        # Build next action hint
+                        b_stage = dca['buy_stage']
+                        s_stage = dca['sell_stage']
+                        if btc_bal >= COINDCX_MIN_BTC_QTY and dca['avg_buy_price'] > 0:
+                            ns = s_stage + 1
+                            if ns <= len(SELL_STAGES):
+                                rise_pct = SELL_STAGES[ns-1][0]
+                                ref      = last_sell if (ns > 1 and last_sell) else dca['avg_buy_price']
+                                tgt      = round(ref * (1 + rise_pct/100), 2)
+                                hint     = f"Waiting: Sell S{ns} @ Rs {tgt:,.2f} (+{rise_pct}%)"
+                            else:
+                                hint = "All sell stages done"
+                        elif inr_bal > 0 and b_stage < len(BUY_STAGES):
+                            nb = b_stage + 1
+                            if nb == 1:
+                                hint = "Ready: Initial buy (Stage 1) fires next cycle"
+                            else:
+                                dip_pct = BUY_STAGES[nb-1][0]
+                                ref     = last_sell if last_sell else 0
+                                tgt     = round(ref * (1 - dip_pct/100), 2) if ref else 0
+                                hint    = (f"Waiting: Buy S{nb} @ Rs {tgt:,.2f} (-{dip_pct}%)"
+                                           if tgt else f"Waiting for Buy S{nb} (-{dip_pct}%)")
+                        else:
+                            hint = "Idle"
+
+                        msg = (
+                            f"Worker Status\n"
+                            f"Trading: {status_icon}\n"
+                            f"BTC Price: Rs {price:,.2f}\n"
+                            f"INR Balance: Rs {inr_bal:,.2f}\n"
+                            f"BTC Balance: {btc_bal:.6f}\n"
+                            f"Entry Price: {entry_line}\n"
+                            f"Avg Buy: {avg_line}\n"
+                            f"Buy stage: {b_stage}/3 | Sell stage: {s_stage}/3\n"
+                            f"Last sell ref: {last_sell_ln}\n"
+                            f"Next action: {hint}\n"
+                            f"Trades this run: {_worker_status['trades']}"
+                            f"{balance_note}"
+                        )
+                        send_telegram(msg)
+                        log("📊 /status sent to Telegram")
+                    except Exception as se:
+                        log(f"❌ /status error: {se}")
+                        send_telegram(f"Error fetching status: {se}")
 
             # ── Check if trading is active ──────────
             if not get_autotrade_active():

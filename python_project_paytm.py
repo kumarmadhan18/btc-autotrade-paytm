@@ -385,6 +385,7 @@ def init_mysql_tables():
         ("last_sell_price_btc", "DOUBLE PRECISION DEFAULT 0"),
         ("dca_buy_stage",       "INT DEFAULT 0"),
         ("dca_sell_stage",      "INT DEFAULT 0"),
+        ("autotrade_active",    "BOOLEAN DEFAULT FALSE"),
     ]:
         try:
             cursor.execute(f"ALTER TABLE trade_state ADD COLUMN {col} {definition}")
