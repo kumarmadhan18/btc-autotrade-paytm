@@ -517,6 +517,8 @@ def set_autotrade_active(active: bool, reason: str = ""):
     """
     Writes autotrade_active to trade_state (id=1) AND logs a history
     row to wallet_transactions for audit trail.
+    Uses INSERT ... ON CONFLICT (upsert) so id=1 row is always created
+    if it doesn't exist yet — safe for both fresh and existing installs.
     """
     conn = get_db()
     if not conn:
@@ -525,10 +527,12 @@ def set_autotrade_active(active: bool, reason: str = ""):
     trade_type = "AUTO_TRADE_START" if active else "AUTO_TRADE_STOP"
     try:
         cur = get_cursor(conn)
-        cur.execute(
-            "UPDATE trade_state SET autotrade_active=%s WHERE id=1",
-            (active,)
-        )
+        # UPSERT — creates id=1 if missing, updates if exists
+        cur.execute("""
+            INSERT INTO trade_state (id, entry_price, peak_price, autotrade_active)
+            VALUES (1, 0, 0, %s)
+            ON CONFLICT (id) DO UPDATE SET autotrade_active = EXCLUDED.autotrade_active
+        """, (active,))
         cur.execute("""
             INSERT INTO wallet_transactions
             (trade_time, action, amount, balance_after, inr_value,
@@ -540,6 +544,10 @@ def set_autotrade_active(active: bool, reason: str = ""):
         log(f"Auto-Trade {icon} written to DB. {reason}")
     except Exception as e:
         log(f"Error: set_autotrade_active failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     finally:
         conn.close()
 
@@ -593,8 +601,16 @@ def save_entry_price(price: float):
         return
     try:
         cur = get_cursor(conn)
-        cur.execute("UPDATE trade_state SET entry_price=%s WHERE id=1", (price,))
+        cur.execute("""
+            INSERT INTO trade_state (id, entry_price, peak_price, autotrade_active)
+            VALUES (1, %s, 0, FALSE)
+            ON CONFLICT (id) DO UPDATE SET entry_price = EXCLUDED.entry_price
+        """, (price,))
         conn.commit()
+    except Exception as e:
+        log(f"Warning: save_entry_price failed: {e}")
+        try: conn.rollback()
+        except Exception: pass
     finally:
         conn.close()
 
@@ -605,8 +621,16 @@ def clear_entry_price():
         return
     try:
         cur = get_cursor(conn)
-        cur.execute("UPDATE trade_state SET entry_price=0 WHERE id=1")
+        cur.execute("""
+            INSERT INTO trade_state (id, entry_price, peak_price, autotrade_active)
+            VALUES (1, 0, 0, FALSE)
+            ON CONFLICT (id) DO UPDATE SET entry_price = 0
+        """)
         conn.commit()
+    except Exception as e:
+        log(f"Warning: clear_entry_price failed: {e}")
+        try: conn.rollback()
+        except Exception: pass
     finally:
         conn.close()
 
@@ -711,10 +735,18 @@ def save_dca_state(buy_stage=None, sell_stage=None, avg_buy_price=None, last_sel
         if not fields:
             return
         vals.append(1)
-        cur.execute(f"UPDATE trade_state SET {', '.join(fields)} WHERE id=1", vals)
+        # Build an UPSERT: insert id=1 if missing, update the changed fields
+        set_clause = ', '.join(fields)
+        cur.execute(f"""
+            INSERT INTO trade_state (id, entry_price, peak_price, autotrade_active)
+            VALUES (1, 0, 0, FALSE)
+            ON CONFLICT (id) DO UPDATE SET {set_clause}
+        """, vals)
         conn.commit()
     except Exception as e:
-        log(f"❌ save_dca_state error: {e}")
+        log(f"Warning: save_dca_state error: {e}")
+        try: conn.rollback()
+        except Exception: pass
     finally:
         conn.close()
 

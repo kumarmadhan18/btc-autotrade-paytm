@@ -380,34 +380,67 @@ def init_mysql_tables():
     )
     """)
 
-    # ── Migration: add DCA columns if not present (existing installs) ──
-    for col, definition in [
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    # ── Migration: each ALTER TABLE needs its own connection in PostgreSQL.
+    # If a column already exists, PostgreSQL aborts the transaction.
+    # Using a separate connection per ALTER ensures the abort is isolated.
+    migration_cols = [
         ("avg_buy_price",       "DOUBLE PRECISION DEFAULT 0"),
         ("last_sell_price_btc", "DOUBLE PRECISION DEFAULT 0"),
         ("dca_buy_stage",       "INT DEFAULT 0"),
         ("dca_sell_stage",      "INT DEFAULT 0"),
         ("autotrade_active",    "BOOLEAN DEFAULT FALSE"),
-    ]:
+    ]
+    for col, definition in migration_cols:
+        mc = get_mysql_connection()
+        if not mc:
+            continue
         try:
-            cursor.execute(f"ALTER TABLE trade_state ADD COLUMN {col} {definition}")
-            conn.commit()
-            print(f"✅ Migrated: added column {col} to trade_state")
+            mc.autocommit = True          # DDL needs autocommit on PostgreSQL
+            cur2 = get_cursor(mc)
+            cur2.execute(f"ALTER TABLE trade_state ADD COLUMN {col} {definition}")
+            print(f"✅ Migrated: added {col} to trade_state")
         except Exception:
-            pass  # column already exists — ignore
+            pass  # column already exists — safe to ignore
+        finally:
+            try:
+                mc.autocommit = False
+            except Exception:
+                pass
+            mc.close()
 
-    # Seed lock and state rows (ignore duplicates)
-    try:
-        cursor.execute("INSERT INTO trade_execution_lock (id, is_locked) VALUES (1, FALSE)")
-    except Exception:
-        pass
-    try:
-        cursor.execute("INSERT INTO trade_state (id, entry_price, peak_price) VALUES (1, 0, 0)")
-    except Exception:
-        pass
+    # ── Seed id=1 rows using UPSERT so they always exist ──────────────────
+    # Plain INSERT silently fails if the connection is in aborted state.
+    # ON CONFLICT DO NOTHING is a safe idempotent upsert for both PG and MySQL.
+    sc = get_mysql_connection()
+    if sc:
+        try:
+            sc.autocommit = True
+            cur3 = get_cursor(sc)
+            try:
+                cur3.execute(
+                    "INSERT INTO trade_execution_lock (id, is_locked) "
+                    "VALUES (1, FALSE) ON CONFLICT (id) DO NOTHING"
+                )
+            except Exception:
+                pass
+            try:
+                cur3.execute(
+                    "INSERT INTO trade_state (id, entry_price, peak_price, autotrade_active) "
+                    "VALUES (1, 0, 0, FALSE) ON CONFLICT (id) DO NOTHING"
+                )
+            except Exception:
+                pass
+        finally:
+            try:
+                sc.autocommit = False
+            except Exception:
+                pass
+            sc.close()
 
-    conn.commit()
-    cursor.close()
-    conn.close()
     print("✅ Tables initialized.")
 
 
@@ -2164,8 +2197,8 @@ def update_autotrade_status_db(status: int):
     """
     Writes autotrade on/off to trade_state.autotrade_active (primary)
     and also logs an audit row to wallet_transactions.
-    Both this app and the worker read from trade_state — so they stay in sync
-    even when Streamlit is closed.
+    Uses INSERT ... ON CONFLICT (upsert) so id=1 row is always created
+    if it doesn't exist yet — safe for both fresh and existing installs.
     """
     conn = None
     try:
@@ -2173,11 +2206,12 @@ def update_autotrade_status_db(status: int):
         if not conn:
             return
         cursor = get_cursor(conn)
-        # Primary: update dedicated flag column
-        cursor.execute(
-            "UPDATE trade_state SET autotrade_active=%s WHERE id=1",
-            (bool(status),)
-        )
+        # Primary: UPSERT into trade_state so missing id=1 is never a problem
+        cursor.execute("""
+            INSERT INTO trade_state (id, entry_price, peak_price, autotrade_active)
+            VALUES (1, 0, 0, %s)
+            ON CONFLICT (id) DO UPDATE SET autotrade_active = EXCLUDED.autotrade_active
+        """, (bool(status),))
         # Audit trail row
         cursor.execute("""
             INSERT INTO wallet_transactions
