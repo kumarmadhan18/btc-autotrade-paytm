@@ -375,6 +375,7 @@ def init_mysql_tables():
         last_sell_price_btc  DOUBLE PRECISION DEFAULT 0,
         dca_buy_stage        INT DEFAULT 0,
         dca_sell_stage       INT DEFAULT 0,
+        autotrade_active     BOOLEAN DEFAULT FALSE,
         updated_at           {ts}
     )
     """)
@@ -505,21 +506,48 @@ def save_entry_price(price):
 
 def get_last_auto_buy_price() -> float:
     """
-    Returns the avg_price of the last successful AUTO_BUY from live_trades.
-    Used to restore entry_price after bot restart without losing context.
+    Returns the price of the most recent BUY from ANY source —
+    manual trades via CoinDCX/Streamlit AND auto buys from the worker.
+    Used to restore entry_price after bot restart.
     """
     conn = get_mysql_connection()
     if not conn:
         return 0.0
     try:
         cursor = get_cursor(conn)
+        # live_trades: all BUY actions (manual + auto)
         cursor.execute("""
-            SELECT price FROM live_trades
-            WHERE action = 'BUY' AND status IN ('filled','partially_filled')
+            SELECT price, trade_time FROM live_trades
+            WHERE action IN ('BUY','AUTO_BUY','MANUAL_BUY')
+              AND status IN ('filled','partially_filled','SUCCESS','COMPLETED')
             ORDER BY trade_time DESC LIMIT 1
         """)
-        row = cursor.fetchone()
-        return float(row["price"]) if row and row.get("price") else 0.0
+        lt = cursor.fetchone()
+
+        # wallet_transactions: auto buys from worker
+        cursor.execute("""
+            SELECT inr_value AS price, trade_time FROM wallet_transactions
+            WHERE trade_type LIKE 'AUTO_BUY%%'
+            ORDER BY trade_time DESC LIMIT 1
+        """)
+        wt = cursor.fetchone()
+
+        def to_ts(row):
+            val = row.get("trade_time") if row else None
+            if val is None: return 0
+            return val.timestamp() if hasattr(val, "timestamp") else float(val or 0)
+
+        lt_ts = to_ts(lt)
+        wt_ts = to_ts(wt)
+
+        if lt_ts >= wt_ts and lt:
+            return float(lt.get("price", 0) or 0)
+        elif wt:
+            return float(wt.get("price", 0) or 0)
+        return 0.0
+    except Exception as e:
+        print(f"get_last_auto_buy_price error: {e}")
+        return 0.0
     finally:
         conn.close()
 
@@ -2092,18 +2120,25 @@ def place_market_sell(btc_qty: float) -> dict:
 # Auto-Trade State
 # ─────────────────────────────────────────
 def get_autotrade_active_from_db() -> bool:
+    """
+    Reads autotrade_active directly from trade_state (id=1).
+    Single source of truth shared by both this Streamlit app and
+    the worker process — both read and write the same column.
+    """
     conn = get_mysql_connection()
     if not conn:
         return False
     try:
         cursor = get_cursor(conn)
-        cursor.execute("""
-            SELECT trade_type FROM wallet_transactions
-            WHERE trade_type IN ('AUTO_TRADE_START', 'AUTO_TRADE_STOP')
-            ORDER BY trade_time DESC LIMIT 1
-        """)
+        cursor.execute("SELECT autotrade_active FROM trade_state WHERE id=1")
         row = cursor.fetchone()
-        return bool(row and row.get('trade_type') == 'AUTO_TRADE_START')
+        if not row:
+            return False
+        val = row.get("autotrade_active")
+        return bool(val) if val is not None else False
+    except Exception as e:
+        print(f"get_autotrade_active_from_db error: {e}")
+        return False
     finally:
         conn.close()
 
@@ -2126,12 +2161,24 @@ def restore_autotrade_state():
 
 
 def update_autotrade_status_db(status: int):
+    """
+    Writes autotrade on/off to trade_state.autotrade_active (primary)
+    and also logs an audit row to wallet_transactions.
+    Both this app and the worker read from trade_state — so they stay in sync
+    even when Streamlit is closed.
+    """
     conn = None
     try:
         conn   = get_mysql_connection()
         if not conn:
             return
         cursor = get_cursor(conn)
+        # Primary: update dedicated flag column
+        cursor.execute(
+            "UPDATE trade_state SET autotrade_active=%s WHERE id=1",
+            (bool(status),)
+        )
+        # Audit trail row
         cursor.execute("""
             INSERT INTO wallet_transactions
             (trade_time, action, amount, balance_after, inr_value,
@@ -2242,15 +2289,33 @@ def get_last_trade_time_from_logs():
         conn.close()
 
 
-def get_last_auto_trade():
-    """Returns last AUTO_BUY or AUTO_SELL row.
-    Normalises trade_type to 'AUTO_BUY' or 'AUTO_SELL' regardless
-    of variant stored (e.g. AUTO_SELL_PROFIT_TARGET → AUTO_SELL)."""
+def get_last_any_trade():
+    """
+    Returns the most recent trade (BUY or SELL) from ANY source:
+      - live_trades  : manual trades via CoinDCX/Streamlit + auto trades
+      - wallet_transactions : auto trades logged by this app and the worker
+
+    Ensures bot logic reacts to manual buys/sells, not just auto trades.
+    Always normalises trade_type to "AUTO_BUY" or "AUTO_SELL".
+    """
     conn = get_mysql_connection()
     if not conn:
         return None
     try:
         cursor = get_cursor(conn)
+
+        # live_trades: manual + auto from both Streamlit and worker
+        cursor.execute("""
+            SELECT action, price AS inr_value, amount, trade_time
+            FROM live_trades
+            WHERE action IN ('BUY','SELL','AUTO_BUY','AUTO_SELL',
+                             'MANUAL_BUY','MANUAL_SELL')
+              AND status IN ('filled','partially_filled','SUCCESS','COMPLETED')
+            ORDER BY trade_time DESC LIMIT 1
+        """)
+        lt = cursor.fetchone()
+
+        # wallet_transactions: auto trades
         cursor.execute("""
             SELECT trade_type, trade_time, inr_value, amount, balance_after
             FROM wallet_transactions
@@ -2259,17 +2324,52 @@ def get_last_auto_trade():
                OR trade_type LIKE 'AUTO_BUY_%%'
             ORDER BY trade_time DESC LIMIT 1
         """)
-        row = cursor.fetchone()
-        if row:
-            # Normalise so downstream code always sees "AUTO_BUY" or "AUTO_SELL"
-            raw = row.get("trade_type", "")
-            if raw.startswith("AUTO_SELL"):
-                row["trade_type"] = "AUTO_SELL"
-            elif raw.startswith("AUTO_BUY"):
-                row["trade_type"] = "AUTO_BUY"
-        return row
+        wt = cursor.fetchone()
+
+        from datetime import datetime
+        def to_ts(row, key="trade_time"):
+            val = row.get(key) if row else None
+            if val is None:
+                return 0
+            if hasattr(val, "timestamp"):
+                return val.timestamp()
+            try:
+                return float(val)
+            except Exception:
+                return 0
+
+        lt_ts = to_ts(lt)
+        wt_ts = to_ts(wt)
+
+        if lt_ts == 0 and wt_ts == 0:
+            return None
+
+        if lt_ts >= wt_ts and lt:
+            action = str(lt.get("action", "")).upper()
+            trade_type = "AUTO_SELL" if "SELL" in action else "AUTO_BUY"
+            return {
+                "trade_type":    trade_type,
+                "inr_value":     float(lt.get("inr_value", 0) or 0),
+                "amount":        float(lt.get("amount", 0) or 0),
+                "balance_after": 0,
+                "trade_time":    lt.get("trade_time"),
+            }
+        else:
+            raw = wt.get("trade_type", "")
+            trade_type = "AUTO_SELL" if raw.startswith("AUTO_SELL") else "AUTO_BUY"
+            wt["trade_type"] = trade_type
+            return wt
+
+    except Exception as e:
+        print(f"get_last_any_trade error: {e}")
+        return None
     finally:
         conn.close()
+
+
+def get_last_auto_trade():
+    """Alias kept for backward compatibility."""
+    return get_last_any_trade()
 
 
 def get_latest_auto_start_price():
