@@ -180,29 +180,52 @@ def epoch_sql(col):
 # Telegram
 # ─────────────────────────────────────────
 def send_telegram(msg: str):
+    """Send plain-text message to Telegram.
+    No parse_mode — avoids silent failures when msg contains Markdown
+    special characters like - | . ( ) that Telegram rejects."""
     if not ENABLE_NOTIFICATIONS or not BOT_TOKEN or not CHAT_ID:
         return
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"},
-            timeout=8
+            json={"chat_id": str(CHAT_ID), "text": msg},
+            timeout=10
         )
+        if not r.ok:
+            log(f"Warning: Telegram send failed {r.status_code}: {r.text[:120]}")
     except Exception as e:
-        log(f"⚠️ Telegram send failed: {e}")
+        log(f"Warning: Telegram send error: {e}")
+
+
+def _drain_old_telegram_updates():
+    """Called once on startup to skip all old messages so stale
+    commands from previous Render deploys are never replayed."""
+    global _tg_offset
+    if not BOT_TOKEN or not CHAT_ID:
+        return
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+            params={"offset": -1, "limit": 1},
+            timeout=10
+        )
+        if r.ok:
+            updates = r.json().get("result", [])
+            if updates:
+                _tg_offset = updates[-1]["update_id"] + 1
+                log(f"Telegram: skipped old updates, offset={_tg_offset}")
+            else:
+                log("Telegram: no old updates to skip")
+    except Exception as e:
+        log(f"Warning: drain_old_telegram_updates: {e}")
 
 
 def poll_telegram_commands() -> list:
     """
-    Polls Telegram getUpdates and returns ALL valid commands received since
-    the last poll, in order. Each command is: "stop", "start", or "status".
-
-    Fixes:
-      - Returns a LIST so no command is ever dropped (old code kept only last)
-      - Filters by CHAT_ID so only your messages are acted on
-      - Handles /start@BotName style (Telegram appends bot username in groups)
-      - Advances offset for every update so unknown messages never block queue
-      - Silently skips non-message updates (edited_message, channel_post, etc.)
+    Polls Telegram getUpdates. Returns list of commands: stop/start/status.
+    - timeout=0 (no long-poll) so it returns immediately
+    - Logs every received message for debugging
+    - CHAT_ID compared as string to handle int/str env var differences
     """
     global _tg_offset
     if not BOT_TOKEN or not CHAT_ID:
@@ -210,34 +233,35 @@ def poll_telegram_commands() -> list:
     try:
         r = requests.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-            params={"offset": _tg_offset, "timeout": 2, "limit": 20},
-            timeout=8
+            params={"offset": _tg_offset, "timeout": 0, "limit": 20},
+            timeout=10
         )
         if not r.ok:
-            log(f"Warning: Telegram getUpdates HTTP {r.status_code}")
+            log(f"Warning: Telegram getUpdates {r.status_code}: {r.text[:80]}")
             return []
 
         updates  = r.json().get("result", [])
         commands = []
 
         for update in updates:
-            _tg_offset = update["update_id"] + 1   # always advance even non-commands
+            _tg_offset = update["update_id"] + 1
 
             msg = update.get("message") or update.get("edited_message")
             if not msg:
                 continue
 
-            # Only respond to your own chat — ignore all other senders
-            chat_id = str(msg.get("chat", {}).get("id", ""))
-            if chat_id != str(CHAT_ID):
+            incoming = str(msg.get("chat", {}).get("id", "")).strip()
+            expected = str(CHAT_ID).strip()
+            if incoming != expected:
+                log(f"Telegram: ignoring chat {incoming} (want {expected})")
                 continue
 
             raw = msg.get("text", "").strip()
             if not raw:
                 continue
 
-            # Strip /command@BotUsername suffix Telegram adds in groups
             cmd_part = raw.split()[0].split("@")[0].lower()
+            log(f"Telegram cmd received: '{cmd_part}'")
 
             if cmd_part in ("/stop", "stop"):
                 commands.append("stop")
@@ -245,6 +269,8 @@ def poll_telegram_commands() -> list:
                 commands.append("start")
             elif cmd_part in ("/status", "status"):
                 commands.append("status")
+            else:
+                log(f"Telegram: unknown '{cmd_part}' ignored")
 
         return commands
 
@@ -1407,12 +1433,14 @@ def run_trade_cycle(price_inr: float):
 def main():
     log("🚀 autotrade_worker.py v2.0 started")
     send_telegram(
-        "Auto-Trade Worker v2.1 started - DCA Strategy\n"
+        "Auto-Trade Worker started - DCA Strategy\n"
         "BUY:  B1=immediate(10%) | B2=-3%(25%) | B3=-6%(50%) | Reserve 15%\n"
-        "SELL: S1=immediate(25%) | S2=+3%(35%) | S3=+6%(40%)\n"
-        "B2/B3 dip from B1 price | S2/S3 rise from S1 price\n"
+        "SELL: S1=+3% | S2=+6% | S3=+9% (all from latest buy price)\n"
         "Commands: /stop | /start | /status"
     )
+
+    # Skip stale messages from before this startup — avoids replaying old commands
+    _drain_old_telegram_updates()
 
     consecutive_errors = 0
 
