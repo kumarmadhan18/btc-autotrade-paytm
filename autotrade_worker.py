@@ -1105,7 +1105,8 @@ def run_trade_cycle(price_inr: float):
 
     # 60s cooldown between trades
     if last_auto and last_auto.get("ts"):
-        if time.time() - float(last_auto["ts"]) < 60:
+        ts_val = float(last_auto["ts"] or 0)
+        if ts_val > 0 and time.time() - ts_val < 60:
             return
 
     # ── Restore entry_price / avg_buy from DB after restart ─────────────────
@@ -1170,12 +1171,10 @@ def run_trade_cycle(price_inr: float):
 
     # ══════════════════════════════════════════════════════════════════════════
     # STATE A — Holding BTC → STAGED SELL
-    #
-    #   Stage 1 = initial sell: fires immediately at current price (no rise wait)
-    #             sells 25% of BTC right after buy completes.
-    #   Stage 2: price rises 3% above Stage 1 sell price → sell 35% of BTC
-    #   Stage 3: price rises 6% above Stage 1 sell price → sell 40% of BTC
-    #   NO stop-loss — hold remaining BTC until each stage target is hit.
+    #   S1: price >= latest_buy * 1.03 (+3%) → sell 25% BTC
+    #   S2: price >= latest_buy * 1.06 (+6%) → sell 35% BTC
+    #   S3: price >= latest_buy * 1.09 (+9%) → sell 40% BTC
+    #   All targets from entry_price (actual buy fill price). No stop-loss.
     # ══════════════════════════════════════════════════════════════════════════
     if btc_balance >= COINDCX_MIN_BTC_QTY:
 
@@ -1275,10 +1274,11 @@ def run_trade_cycle(price_inr: float):
                              f"| {int(remaining_pct*100)}% BTC still holding")
 
         send_telegram(
-            f"🟢 *AUTO SELL — Stage {next_sell}/3 [{sell_label}]*\n"
-            f"  {sold_btc:.6f} BTC → ₹{inr_received:,.2f}\n"
-            f"  Avg buy ₹{avg_buy:,.2f} → Exit ₹{avg_price:,.2f}\n"
-            f"  Profit: ₹{actual_profit:+.2f} | ROI: {roi_pct:+.2f}%\n"
+            f"🟢 AUTO SELL S{next_sell}/3 [{sell_label}]\n"
+            f"  Sold: {sold_btc:.5f} BTC @ Rs.{avg_price:,.2f}\n"
+            f"  Received: Rs.{inr_received:,.2f}\n"
+            f"  Avg buy: Rs.{avg_buy:,.2f} | Profit: Rs.{actual_profit:+.2f}\n"
+            f"  ROI: {roi_pct:+.2f}%\n"
             f"  {completion}"
         )
         return
@@ -1404,9 +1404,9 @@ def run_trade_cycle(price_inr: float):
         _worker_status["trades"] += 1
 
         # Sell targets are calculated from THIS buy price (avg_price)
-        s1_sell = avg_price                          # S1 fires immediately
-        s2_sell = round(avg_price * 1.03, 2)         # S2 +3% from buy
-        s3_sell = round(avg_price * 1.06, 2)         # S3 +6% from buy
+        s1_sell = round(avg_price * 1.03, 2)         # S1 +3% from buy
+        s2_sell = round(avg_price * 1.06, 2)         # S2 +6% from buy
+        s3_sell = round(avg_price * 1.09, 2)         # S3 +9% from buy
 
         # Next DCA buy hint (from last_sell_px — the real sell reference)
         next_hint = ""
@@ -1421,7 +1421,7 @@ def run_trade_cycle(price_inr: float):
             f"  Rs.{buy_inr:,.2f} -> {btc_bought:.5f} BTC @ Rs.{avg_price:,.2f}\n"
             f"  Total BTC: {new_btc:.5f} | Avg buy: Rs.{new_avg_buy:,.2f}\n"
             f"  Sell targets from buy Rs.{avg_price:,.2f}:\n"
-            f"  S1 immediate | S2 Rs.{s2_sell:,.2f} (+3%) | S3 Rs.{s3_sell:,.2f} (+6%)\n"
+            f"  S1 Rs.{s1_sell:,.2f} (+3%) | S2 Rs.{s2_sell:,.2f} (+6%) | S3 Rs.{s3_sell:,.2f} (+9%)\n"
             f"  Reserve: Rs.{new_inr:,.2f}"
             f"{next_hint}"
         )

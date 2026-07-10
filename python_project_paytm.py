@@ -1,3 +1,4 @@
+import math
 # ============================================================
 # MM BTC Autotrade Pro BOT — RENDER.COM PRODUCTION READY
 # Version: 3.0 | Python 3.11 | Streamlit
@@ -529,10 +530,16 @@ def save_entry_price(price):
         return
     try:
         cursor = get_cursor(conn)
-        cursor.execute("UPDATE trade_state SET entry_price=%s WHERE id=1", (price,))
+        cursor.execute("""
+            INSERT INTO trade_state (id, entry_price, peak_price, autotrade_active)
+            VALUES (1, %s, 0, FALSE)
+            ON CONFLICT (id) DO UPDATE SET entry_price = EXCLUDED.entry_price
+        """, (price,))
         conn.commit()
     except Exception as e:
-        print(f"❌ save_entry_price error: {e}")
+        print(f"save_entry_price error: {e}")
+        try: conn.rollback()
+        except: pass
     finally:
         conn.close()
 
@@ -591,10 +598,16 @@ def clear_entry_price():
         return
     try:
         cursor = get_cursor(conn)
-        cursor.execute("UPDATE trade_state SET entry_price=0 WHERE id=1")
+        cursor.execute("""
+            INSERT INTO trade_state (id, entry_price, peak_price, autotrade_active)
+            VALUES (1, 0, 0, FALSE)
+            ON CONFLICT (id) DO UPDATE SET entry_price = 0
+        """)
         conn.commit()
     except Exception as e:
-        print(f"❌ clear_entry_price error: {e}")
+        print(f"clear_entry_price error: {e}")
+        try: conn.rollback()
+        except: pass
     finally:
         conn.close()
 
@@ -693,10 +706,17 @@ def save_dca_state(buy_stage=None, sell_stage=None, avg_buy_price=None, last_sel
         if not fields:
             return
         vals.append(1)
-        cursor.execute(f"UPDATE trade_state SET {', '.join(fields)} WHERE id=1", vals)
+        set_clause = ", ".join(fields)
+        cursor.execute(f"""
+            INSERT INTO trade_state (id, entry_price, peak_price, autotrade_active)
+            VALUES (1, 0, 0, FALSE)
+            ON CONFLICT (id) DO UPDATE SET {set_clause}
+        """, vals)
         conn.commit()
     except Exception as e:
-        print(f"❌ save_dca_state error: {e}")
+        print(f"save_dca_state error: {e}")
+        try: conn.rollback()
+        except: pass
     finally:
         conn.close()
 
@@ -2866,7 +2886,7 @@ def check_auto_trading(price_inr: float):
         # ── Cycle status → Telegram ──────────────────────────────
         _last_tg_state    = st.session_state.get("_last_tg_state", "")
         _last_tg_time     = st.session_state.get("_last_tg_time", 0)
-        _cur_state        = f"{'BTC' if btc_balance > 0 else 'INR'}_{buy_stage}_{sell_stage}"
+        _cur_state        = f"{'BTC' if btc_balance > 0 else 'INR'}_{buy_stage}_{sell_stage}_{round(avg_buy)}"
         _state_changed    = _cur_state != _last_tg_state
         _two_hours_passed = (time.time() - _last_tg_time) >= 7200
 
@@ -2971,30 +2991,34 @@ def check_auto_trading(price_inr: float):
                 return  # not at target yet — hold
 
             # Execute the sell stage — floor to 5dp (CoinDCX precision requirement)
-            import math as _math
             total_btc = float(get_btc_wallet_balance() or btc_balance)
             raw_qty   = total_btc * next_btc_pct
-            sell_qty  = _math.floor(raw_qty / 0.00001) * 0.00001
+            sell_qty  = math.floor(raw_qty / 0.00001) * 0.00001
             sell_qty  = round(sell_qty, 5)
 
             if sell_qty < COINDCX_MIN_BTC_QTY:
-                sell_qty = _math.floor(total_btc / 0.00001) * 0.00001
+                sell_qty = math.floor(total_btc / 0.00001) * 0.00001
                 sell_qty = round(sell_qty, 5)
 
-            order = place_market_sell(sell_qty)
+            try:
+                order = place_market_sell(sell_qty)
+            except Exception as sell_err:
+                send_telegram(f"SELL S{next_sell} error: {sell_err}")
+                return
             if order["status"] not in ("filled",):
                 send_telegram(f"⚠️ SELL S{next_sell} not filled — {order['status']}. Retrying next cycle.")
                 return
 
             sold_btc      = order["filled_qty"]
             avg_price     = order["avg_price"]
-            fee_inr       = order["fee"]
+            fee_inr       = order["fee"]          # fee in INR (CoinDCX sell fee)
             inr_received  = (sold_btc * avg_price) - fee_inr
             roi_pct       = ((avg_price - avg_buy) / avg_buy) * 100
             actual_profit = inr_received - (avg_buy * sold_btc)
 
+            # API balance already includes settled sell proceeds — use directly
             fresh_inr = float(get_current_inr_balance() or 0)
-            new_inr   = fresh_inr + inr_received
+            new_inr   = fresh_inr if fresh_inr > 0 else (inr_balance + inr_received)
             new_btc   = max(0.0, total_btc - sold_btc)
 
             log_wallet_transaction("AUTO_SELL", sold_btc, new_btc, avg_price,
