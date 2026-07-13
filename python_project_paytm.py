@@ -2847,13 +2847,21 @@ def check_auto_trading(price_inr: float):
         target_pct    = float(st.session_state.get("cfg_target_pct", 3.0))
 
         # ── DCA Stage Config ─────────────────────────────────────
+
+        # OLD BUY STAGES #########
         # BUY stages  (% dip from last sell price → % of INR to deploy)
-        BUY_STAGES  = [(3.0, 0.10), (6.0, 0.25), (9.0, 0.50)]  # (dip%, inr_pct)
+        # BUY_STAGES = [(3.0, 0.10), (6.0, 0.25), (9.0, 0.50)]  # (dip%, inr_pct)
+        
+        # NEW REVISED BUY STAGES #########
+        BUY_STAGES = [(2.8, 0.10), (3.5, 0.25), (4.0, 0.50)]  # (dip%, inr_pct)
         INR_RESERVE = 0.15  # 15% always held back
 
+        # OLD SELL STAGES #########
         # SELL stages (% rise from avg buy price → % of BTC to sell)
-        SELL_STAGES = [(3.0, 0.25), (6.0, 0.35), (9.0, 0.40)]  # (rise%, btc_pct)
+        # SELL_STAGES = [(3.0, 0.25), (6.0, 0.35), (9.0, 0.40)]  # (rise%, btc_pct)
 
+        # NEW SELL STAGES #########
+        SELL_STAGES = [(2.8, 0.25), (3.5, 0.35), (4.0, 0.40)]  # (rise%, btc_pct)
         # ── Last auto trade from DB ──────────────────────────────
         last_auto      = get_last_auto_trade()
         last_type      = last_auto.get("trade_type", "") if last_auto else ""

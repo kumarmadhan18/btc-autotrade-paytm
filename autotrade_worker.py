@@ -107,16 +107,30 @@ DEFAULT_STOP_LOSS_PCT = 2.0
 DEFAULT_DAILY_LOSS_LIMIT = 5.0
 
 # ── DCA Stage Config ──────────────────────────────────────────────────────────
+# OLD BUY STAGES ######
 # BUY stages  → triggered when price drops X% below last sell price
 #               each stage spends Y% of total INR balance
-BUY_STAGES  = [(3.0, 0.10), (6.0, 0.25), (9.0, 0.50)]  # (dip_pct, inr_fraction)
+# BUY_STAGES = [(3.0, 0.10), (6.0, 0.25), (9.0, 0.50)]  # (dip_pct, inr_fraction)
+
+# NEW REVISION BUY SATEGS ######
+# BUY stages  → triggered when price drops X% below last sell price
+#               each stage spends Y% of total INR balance
+BUY_STAGES = [(2.8, 0.10), (3.5, 0.25), (4.0, 0.50)]  # (dip_pct, inr_fraction)
 INR_RESERVE = 0.15   # always keep 15% of INR in reserve
 
+# OLD SALE STAGES
 # SELL stages → triggered when price rises X% above LATEST BUY price
 #   S1: +3% from buy → sell 25% BTC
 #   S2: +6% from buy → sell 35% BTC
 #   S3: +9% from buy → sell 40% BTC
-SELL_STAGES = [(3.0, 0.25), (6.0, 0.35), (9.0, 0.40)]  # (rise_pct, btc_fraction)
+# SELL_STAGES = [(3.0, 0.25), (6.0, 0.35), (9.0, 0.40)]  # (rise_pct, btc_fraction)
+
+# NEW REVISION SALE STAGES
+#   S1: +2.8% from buy → sell 25% BTC
+#   S2: +3.5% from buy → sell 35% BTC
+#   S3: +4% from buy → sell 40% BTC
+SELL_STAGES = [(2.8, 0.25), (3.5, 0.35), (4.0, 0.40)]  # (rise_pct, btc_fraction)
+
 
 # Telegram update offset — tracks last processed message
 _tg_offset = 0
@@ -1415,13 +1429,24 @@ def run_trade_cycle(price_inr: float):
             nb_trigger = round(last_sell_px * (1 - nb_dip / 100), 2)
             next_hint = (f"\n  DCA B{next_buy+1} @ Rs.{nb_trigger:,.2f} "
                          f"(-{nb_dip}% from last sell Rs.{last_sell_px:,.2f})")
+        # OLD TELEGRAM MESSAGE
+        # send_telegram(
+        #     f"AUTO BUY — Stage {next_buy}/3 [{label}]\n"
+        #     f"  Rs.{buy_inr:,.2f} -> {btc_bought:.5f} BTC @ Rs.{avg_price:,.2f}\n"
+        #     f"  Total BTC: {new_btc:.5f} | Avg buy: Rs.{new_avg_buy:,.2f}\n"
+        #     f"  Sell targets from buy Rs.{avg_price:,.2f}:\n"
+        #     f"  S1 Rs.{s1_sell:,.2f} (+3%) | S2 Rs.{s2_sell:,.2f} (+6%) | S3 Rs.{s3_sell:,.2f} (+9%)\n"
+        #     f"  Reserve: Rs.{new_inr:,.2f}"
+        #     f"{next_hint}"
+        # )
 
+        # NEW TELEGRAM MESSAGE
         send_telegram(
             f"AUTO BUY — Stage {next_buy}/3 [{label}]\n"
             f"  Rs.{buy_inr:,.2f} -> {btc_bought:.5f} BTC @ Rs.{avg_price:,.2f}\n"
             f"  Total BTC: {new_btc:.5f} | Avg buy: Rs.{new_avg_buy:,.2f}\n"
             f"  Sell targets from buy Rs.{avg_price:,.2f}:\n"
-            f"  S1 Rs.{s1_sell:,.2f} (+3%) | S2 Rs.{s2_sell:,.2f} (+6%) | S3 Rs.{s3_sell:,.2f} (+9%)\n"
+            f"  S1 Rs.{s1_sell:,.2f} (+2.8%) | S2 Rs.{s2_sell:,.2f} (+3.5%) | S3 Rs.{s3_sell:,.2f} (+4.0%)\n"
             f"  Reserve: Rs.{new_inr:,.2f}"
             f"{next_hint}"
         )
