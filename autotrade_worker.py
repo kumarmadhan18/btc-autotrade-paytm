@@ -487,10 +487,10 @@ def place_buy_order(inr_to_spend: float, spot_price: float) -> dict:
     btc_qty     = math.floor((usable_inr / limit_price) / 0.00001) * 0.00001
     btc_qty     = round(btc_qty, 5)
 
-    if btc_qty <= COINDCX_MIN_BTC_QTY:
+    if btc_qty < COINDCX_MIN_BTC_QTY:
         raise ValueError(
-            f"BTC qty {btc_qty:.6f} at/below minimum {COINDCX_MIN_BTC_QTY}. "
-            f"INR ₹{inr_to_spend:.2f} is too low at current price ₹{spot_price:,.2f}."
+            f"BTC qty {btc_qty:.6f} below minimum {COINDCX_MIN_BTC_QTY}. "
+            f"INR Rs.{inr_to_spend:.2f} too low at price Rs.{spot_price:,.2f}."
         )
 
     notional = btc_qty * spot_price
@@ -515,9 +515,9 @@ def place_sell_order(btc_qty_to_sell: float, spot_price: float) -> dict:
     btc_qty = math.floor(btc_qty_to_sell / 0.00001) * 0.00001
     btc_qty = round(btc_qty, 5)
 
-    if btc_qty <= COINDCX_MIN_BTC_QTY:
+    if btc_qty < COINDCX_MIN_BTC_QTY:
         raise ValueError(
-            f"BTC qty {btc_qty:.6f} at/below minimum {COINDCX_MIN_BTC_QTY}. "
+            f"BTC qty {btc_qty:.6f} below minimum {COINDCX_MIN_BTC_QTY}. "
             f"Cannot sell yet — holding."
         )
 
@@ -1123,24 +1123,38 @@ def run_trade_cycle(price_inr: float):
         if ts_val > 0 and time.time() - ts_val < 60:
             return
 
-    # ── Restore entry_price / avg_buy from DB after restart ─────────────────
-    # Covers manual buys done via CoinDCX or Streamlit, not just auto buys.
+    # ── Restore / seed state when BTC is held ───────────────────────────────
+    # Runs every cycle — safe because it only writes when values are missing.
+    # Covers: fresh deploy, manual buy, DB reset, first-time run with BTC.
     entry_price = get_entry_price()
+
+    # Step 1: If entry_price missing, recover from last BUY in any table
     if entry_price == 0 and btc_balance >= COINDCX_MIN_BTC_QTY:
-        last_buy_price = get_last_any_buy_price()   # manual + auto
+        last_buy_price = get_last_any_buy_price()
         if last_buy_price > 0:
             save_entry_price(last_buy_price)
             entry_price = last_buy_price
-            log(f"📌 Entry price restored from last BUY (manual or auto): Rs.{entry_price:,.2f}")
-    if avg_buy == 0 and entry_price > 0:
+            log(f"Restored entry_price from last BUY: Rs.{entry_price:,.2f}")
+
+    # Step 2: If avg_buy missing but entry_price known, seed avg_buy from entry
+    if btc_balance >= COINDCX_MIN_BTC_QTY and entry_price > 0 and avg_buy == 0:
         avg_buy = entry_price
         save_dca_state(avg_buy_price=avg_buy)
-        # If bot restarted and finds BTC but buy_stage is 0, seed it to 1
-        # so sell logic is immediately active (not waiting for an initial buy)
-        if buy_stage == 0:
-            buy_stage = 1
-            save_dca_state(buy_stage=1)
-            log("📌 buy_stage seeded to 1 — BTC detected in wallet after restart")
+        log(f"Seeded avg_buy from entry_price: Rs.{avg_buy:,.2f}")
+
+    # Step 3: If BTC held but buy_stage=0, seed to 1 so sell logic activates
+    if btc_balance >= COINDCX_MIN_BTC_QTY and buy_stage == 0 and avg_buy > 0:
+        buy_stage = 1
+        save_dca_state(buy_stage=1)
+        log(f"Seeded buy_stage=1 — BTC {btc_balance:.5f} held in wallet")
+
+    # Step 4: If BTC held but sell_stage=3 (all sells 'done' but BTC still here),
+    # reset sell_stage to 0 so sells can fire again (happens after partial fills
+    # or if DB was out of sync)
+    if btc_balance >= COINDCX_MIN_BTC_QTY and sell_stage >= len(SELL_STAGES):
+        sell_stage = 0
+        save_dca_state(sell_stage=0)
+        log(f"Reset sell_stage to 0 — BTC still held despite sell_stage={sell_stage}")
 
     # ══════════════════════════════════════════════════════════════════════════
     # SMART STATE OVERRIDE
@@ -1232,9 +1246,13 @@ def run_trade_cycle(price_inr: float):
         sell_qty = math.floor(raw_qty / 0.00001) * 0.00001
         sell_qty = round(sell_qty, 5)
         if sell_qty < COINDCX_MIN_BTC_QTY:
-            # Use all remaining if too small after flooring
+            # Use full BTC balance if pct-based qty too small after flooring
             sell_qty = math.floor(btc_balance / 0.00001) * 0.00001
             sell_qty = round(sell_qty, 5)
+        if sell_qty < COINDCX_MIN_BTC_QTY:
+            log(f"⚠️ SELL S{next_sell} skipped — qty {sell_qty:.5f} below CoinDCX min after flooring. BTC balance too small.")
+            send_telegram(f"SELL S{next_sell} skipped — BTC balance {btc_balance:.5f} too small to sell after precision floor.")
+            return
 
         log(f"🔔 SELL Stage {next_sell}/3 [{sell_label}] — "
             f"selling {sell_qty:.6f} BTC ({int(next_btc_pct*100)}% of holdings)...")
@@ -1418,9 +1436,9 @@ def run_trade_cycle(price_inr: float):
         _worker_status["trades"] += 1
 
         # Sell targets are calculated from THIS buy price (avg_price)
-        s1_sell = round(avg_price * 1.03, 2)         # S1 +3% from buy
-        s2_sell = round(avg_price * 1.06, 2)         # S2 +6% from buy
-        s3_sell = round(avg_price * 1.09, 2)         # S3 +9% from buy
+        s1_sell = round(avg_price * (1 + SELL_STAGES[0][0]/100), 2)
+        s2_sell = round(avg_price * (1 + SELL_STAGES[1][0]/100), 2)
+        s3_sell = round(avg_price * (1 + SELL_STAGES[2][0]/100), 2)
 
         # Next DCA buy hint (from last_sell_px — the real sell reference)
         next_hint = ""
@@ -1459,8 +1477,8 @@ def main():
     log("🚀 autotrade_worker.py v2.0 started")
     send_telegram(
         "Auto-Trade Worker started - DCA Strategy\n"
-        "BUY:  B1=immediate(10%) | B2=-3%(25%) | B3=-6%(50%) | Reserve 15%\n"
-        "SELL: S1=+3% | S2=+6% | S3=+9% (all from latest buy price)\n"
+        "BUY:  B1=immediate(10%) | B2=-2.8%(25%) | B3=-3.5%(50%) | Reserve 15%\n"
+        "SELL: S1=+2.8% | S2=+3.5% | S3=+4.0% (all from latest buy price)\n"
         "Commands: /stop | /start | /status"
     )
 
@@ -1500,9 +1518,18 @@ def main():
                         avg_buy = dca["avg_buy_price"]
                         last_px = dca["last_sell_price_btc"]
                         entry   = get_entry_price()
-                        buy_ref = entry if entry > 0 else avg_buy
                         status_icon = "ACTIVE" if active else "PAUSED"
                         bal_warn    = "" if bal_ok else "\nWARNING: Balance fetch failed"
+
+                        # Use entry_price as buy_ref if avg_buy not yet saved in DB
+                        buy_ref = avg_buy if avg_buy > 0 else entry
+
+                        # Correct stage display based on wallet reality
+                        # If BTC held but b_stage=0, it means state not seeded yet
+                        if btc_bal >= COINDCX_MIN_BTC_QTY and b_stage == 0 and buy_ref > 0:
+                            b_stage = 1   # display as B1 done (BTC is held)
+                        if btc_bal >= COINDCX_MIN_BTC_QTY and s_stage >= len(SELL_STAGES):
+                            s_stage = 0   # reset display if BTC still held
 
                         # P&L
                         if btc_bal >= COINDCX_MIN_BTC_QTY and avg_buy > 0:

@@ -2874,15 +2874,30 @@ def check_auto_trading(price_inr: float):
         avg_buy      = dca["avg_buy_price"]
         last_sell_px = dca["last_sell_price_btc"]
 
-        # ── Entry price (saved at time of BUY) ──────────────────
+        # ── Restore / seed state when BTC is held ──────────────
         entry_price = float(get_entry_price() or 0)
 
-        # ── Restore entry from last BUY if missing ───────────────
+        # Step 1: recover entry_price from last BUY if missing
         if entry_price == 0 and btc_balance >= COINDCX_MIN_BTC_QTY:
             _recovered = get_last_auto_buy_price()
             if _recovered > 0:
                 save_entry_price(_recovered)
                 entry_price = _recovered
+
+        # Step 2: seed avg_buy from entry_price if missing
+        if btc_balance >= COINDCX_MIN_BTC_QTY and entry_price > 0 and avg_buy == 0:
+            avg_buy = entry_price
+            save_dca_state(avg_buy_price=avg_buy)
+
+        # Step 3: seed buy_stage=1 if BTC held but stage=0
+        if btc_balance >= COINDCX_MIN_BTC_QTY and buy_stage == 0 and avg_buy > 0:
+            buy_stage = 1
+            save_dca_state(buy_stage=1)
+
+        # Step 4: reset sell_stage if BTC still held but all sells 'done'
+        if btc_balance >= COINDCX_MIN_BTC_QTY and sell_stage >= len(SELL_STAGES):
+            sell_stage = 0
+            save_dca_state(sell_stage=0)
 
         # ── Trade cooldown: 60s between trades ───────────────────
         if last_auto and last_auto.get("trade_time"):
@@ -2903,10 +2918,13 @@ def check_auto_trading(price_inr: float):
             st.session_state["_last_tg_time"]  = time.time()
             tag = "🔔 State Update" if _state_changed else "⏰ 2h Heartbeat"
 
-            if btc_balance > 0 and avg_buy > 0:
-                _buy_ref   = entry_price if entry_price > 0 else avg_buy
-                profit_now = (price_inr - avg_buy) * btc_balance
-                pnl_pct    = ((price_inr - avg_buy) / avg_buy) * 100
+            # Use entry_price as buy_ref when avg_buy not yet in DB
+            _eff_avg_buy = avg_buy if avg_buy > 0 else entry_price
+            if btc_balance > 0 and _eff_avg_buy > 0:
+                _buy_ref   = entry_price if entry_price > 0 else _eff_avg_buy
+                avg_buy    = _eff_avg_buy   # use for P&L calc
+                profit_now = (price_inr - _eff_avg_buy) * btc_balance
+                pnl_pct    = ((price_inr - _eff_avg_buy) / _eff_avg_buy) * 100
                 sign       = "+" if profit_now >= 0 else ""
                 # Show all remaining sell targets from buy price
                 sell_targets = " | ".join(
@@ -2916,7 +2934,7 @@ def check_auto_trading(price_inr: float):
                 send_telegram(
                     f"{tag}\n"
                     f"Holding {btc_balance:.5f} BTC | B-stage {buy_stage}/3 | S-stage {sell_stage}/3\n"
-                    f"Bought @ Rs.{avg_buy:,.2f} | Now Rs.{price_inr:,.2f}\n"
+                    f"Bought @ Rs.{_eff_avg_buy:,.2f} | Now Rs.{price_inr:,.2f}\n"
                     f"P&L: Rs.{sign}{profit_now:,.2f} ({sign}{pnl_pct:.2f}%)\n"
                     f"Sell targets: {sell_targets}\n"
                     f"No stop-loss - holding until target"
@@ -2969,18 +2987,19 @@ def check_auto_trading(price_inr: float):
 
         # ╔══════════════════════════════════════════════════════════════╗
         # ║  STATE A — Have BTC → STAGED SELL                           ║
-        # ║  S1: price ≥ entry × 1.03 (+3% from buy) → sell 25% BTC   ║
-        # ║  S2: price ≥ entry × 1.06 (+6% from buy) → sell 35% BTC   ║
-        # ║  S3: price ≥ entry × 1.09 (+9% from buy) → sell 40% BTC   ║
+        # ║  S1: +2.8%, S2: +3.5%, S3: +4.0% from latest buy price    ║
+        # ║  sell 25% / 35% / 40% of BTC per stage                     ║
+        # ║                                                              ║
         # ║  All targets from LATEST BUY price — no stop loss           ║
         # ╚══════════════════════════════════════════════════════════════╝
         if btc_balance >= COINDCX_MIN_BTC_QTY:
 
             if avg_buy == 0:
-                # Recover avg_buy from entry_price
+                # Recover avg_buy from entry_price — do NOT return, continue to sell
                 avg_buy = entry_price if entry_price > 0 else price_inr
                 save_dca_state(avg_buy_price=avg_buy)
-                return
+                if entry_price == 0:
+                    save_entry_price(avg_buy)
 
             # Find which sell stage to attempt next
             next_sell = sell_stage + 1
@@ -3007,6 +3026,9 @@ def check_auto_trading(price_inr: float):
             if sell_qty < COINDCX_MIN_BTC_QTY:
                 sell_qty = math.floor(total_btc / 0.00001) * 0.00001
                 sell_qty = round(sell_qty, 5)
+            if sell_qty < COINDCX_MIN_BTC_QTY:
+                send_telegram(f"SELL S{next_sell} skipped — BTC {total_btc:.5f} too small after precision floor.")
+                return
 
             try:
                 order = place_market_sell(sell_qty)
@@ -3922,9 +3944,14 @@ if is_live():
     if BTC_WALLET['balance'] > 0:
         with st.form("btc_withdraw_form", clear_on_submit=False):
             withdraw_address = st.text_input("Destination BTC Address")
-            withdraw_amount  = st.number_input("Amount (BTC)", min_value=0.0001,
-                                               max_value=BTC_WALLET['balance'],
-                                               step=0.0001, format="%.8f")
+            _btc_bal     = float(BTC_WALLET.get("balance", 0) or 0)
+            _btc_min     = min(0.00001, _btc_bal)  # never let min > max
+            _btc_default = min(0.0001, _btc_bal) if _btc_bal >= 0.00001 else _btc_bal
+            withdraw_amount  = st.number_input("Amount (BTC)",
+                                               min_value=_btc_min,
+                                               max_value=_btc_bal if _btc_bal > 0 else 0.00001,
+                                               value=_btc_default,
+                                               step=0.00001, format="%.5f")
             if st.form_submit_button("Submit Withdrawal"):
                 try:
                     tx = wallet.send_to(address=withdraw_address, amount=withdraw_amount, network='bitcoin')
