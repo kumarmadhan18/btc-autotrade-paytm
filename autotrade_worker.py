@@ -525,7 +525,7 @@ def place_sell_order(btc_qty_to_sell: float, spot_price: float) -> dict:
     if notional < 100:
         raise ValueError(f"Order notional ₹{notional:.2f} below CoinDCX minimum ₹100.")
 
-    log(f"📤 SELL {btc_qty:.6f} BTC @ ₹{spot_price:,.2f}")
+    log(f"SELL {btc_qty:.5f} BTC @ Rs.{spot_price:,.2f} | Notional Rs.{notional:.2f}")
     result = _execute_order("sell", btc_qty, spot_price)
     return result
 
@@ -1241,17 +1241,27 @@ def run_trade_cycle(price_inr: float):
             return  # not at target yet — hold
 
         # ── Execute sell stage ────────────────────────────────────────────────
-        # Floor to 5 decimal places before passing to CoinDCX
+        # Floor to 5 decimal places (CoinDCX requirement).
+        # If pct-based qty notional < Rs.100 min, escalate to full balance.
+        # This handles small BTC holdings where 25% is below the order minimum.
         raw_qty  = btc_balance * next_btc_pct
         sell_qty = math.floor(raw_qty / 0.00001) * 0.00001
         sell_qty = round(sell_qty, 5)
-        if sell_qty < COINDCX_MIN_BTC_QTY:
-            # Use full BTC balance if pct-based qty too small after flooring
+
+        # Check notional — if too small, use full balance instead
+        if sell_qty * price_inr < 100 or sell_qty < COINDCX_MIN_BTC_QTY:
+            log(f"Notional too low for {int(next_btc_pct*100)}% — escalating to full BTC balance")
             sell_qty = math.floor(btc_balance / 0.00001) * 0.00001
             sell_qty = round(sell_qty, 5)
-        if sell_qty < COINDCX_MIN_BTC_QTY:
-            log(f"⚠️ SELL S{next_sell} skipped — qty {sell_qty:.5f} below CoinDCX min after flooring. BTC balance too small.")
-            send_telegram(f"SELL S{next_sell} skipped — BTC balance {btc_balance:.5f} too small to sell after precision floor.")
+
+        # If even full balance is below minimum, skip with clear message
+        if sell_qty < COINDCX_MIN_BTC_QTY or sell_qty * price_inr < 100:
+            log(f"SELL S{next_sell} skipped -  — full BTC {btc_balance:.5f} notional Rs.{btc_balance*price_inr:.2f} still below Rs.100 min.")
+            send_telegram(
+                f"SELL S{next_sell} skipped\n"
+                f"btc_balance Rs.{price_inr:,.2f} | Notional Rs.{btc_balance*price_inr:.2f} < Rs.100 min\n"
+                "Deposit more funds or wait for BTC price to rise"
+            )
             return
 
         log(f"🔔 SELL Stage {next_sell}/3 [{sell_label}] — "

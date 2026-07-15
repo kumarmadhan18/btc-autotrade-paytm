@@ -1874,9 +1874,9 @@ def _cancel_order(order_id: str):
     """Cancel an open or partially filled order."""
     try:
         _coindcx_signed_request("/exchange/v1/orders/cancel", {"id": str(order_id)})
-        log(f"🚫 Order {order_id} cancelled.")
+        print(f"🚫 Order {order_id} cancelled.")
     except Exception as e:
-        log(f"⚠️ Cancel failed for {order_id}: {e}")
+        print(f"⚠️ Cancel failed for {order_id}: {e}")
 
 
 def _poll_order_status(order_id: str, max_wait: int = 120) -> dict:
@@ -1898,14 +1898,14 @@ def _poll_order_status(order_id: str, max_wait: int = 120) -> dict:
                 return data
             # Log every 30s to avoid spam
             if i > 0 and i % 30 == 0:
-                log(f"⏳ Order {order_id} still {status} after {i}s...")
+                print(f"⏳ Order {order_id} still {status} after {i}s...")
         except Exception as e:
-            log(f"⚠️ Status poll error for {order_id}: {e}")
+            print(f"⚠️ Status poll error for {order_id}: {e}")
 
     # Timeout — cancel whatever is open/partial
     if status == "partially_filled":
         filled_qty = float(data.get("total_quantity", 0)) - float(data.get("remaining_quantity", 0))
-        log(f"⚠️ Order {order_id} partially filled ({filled_qty:.6f} BTC) — cancelling remainder.")
+        print(f"⚠️ Order {order_id} partially filled ({filled_qty:.6f} BTC) — cancelling remainder.")
         send_telegram(f"⚠️ Order {order_id} partially filled ({filled_qty:.6f} BTC). Cancelling remainder.")
         _cancel_order(order_id)
         # Return with actual filled qty
@@ -1913,7 +1913,7 @@ def _poll_order_status(order_id: str, max_wait: int = 120) -> dict:
         data["status"]              = "partially_filled"
         return data
     else:
-        log(f"⚠️ Order {order_id} still {status} after {max_wait}s — cancelling.")
+        print(f"⚠️ Order {order_id} still {status} after {max_wait}s — cancelling.")
         send_telegram(f"⚠️ Order {order_id} still {status} after {max_wait}s — cancelling to protect funds.")
         _cancel_order(order_id)
         data["status"] = "cancelled"
@@ -1989,7 +1989,7 @@ def place_market_buy(buy_inr: float) -> dict:
             "side":           "buy",
             "order_type":     "limit_order",
             "market":         "BTCINR",
-            "total_quantity": round(btc_qty, 6),
+            "total_quantity": round(btc_qty, 5),   # CoinDCX max 5dp
             "price_per_unit": limit_price,
         }
     )
@@ -2112,7 +2112,7 @@ def place_market_sell(btc_qty: float) -> dict:
             "side":           "sell",
             "order_type":     "limit_order",
             "market":         "BTCINR",
-            "total_quantity": round(btc_qty_rounded, 6),
+            "total_quantity": round(btc_qty_rounded, 5),   # CoinDCX max 5dp
             "price_per_unit": limit_price,
         }
     )
@@ -3023,11 +3023,18 @@ def check_auto_trading(price_inr: float):
             sell_qty  = math.floor(raw_qty / 0.00001) * 0.00001
             sell_qty  = round(sell_qty, 5)
 
-            if sell_qty < COINDCX_MIN_BTC_QTY:
+            # If pct-based qty notional < Rs.100 min, escalate to full balance
+            if sell_qty < COINDCX_MIN_BTC_QTY or sell_qty * price_inr < 100:
                 sell_qty = math.floor(total_btc / 0.00001) * 0.00001
                 sell_qty = round(sell_qty, 5)
-            if sell_qty < COINDCX_MIN_BTC_QTY:
-                send_telegram(f"SELL S{next_sell} skipped — BTC {total_btc:.5f} too small after precision floor.")
+
+            # If even full balance is below minimum, skip with clear message
+            if sell_qty < COINDCX_MIN_BTC_QTY or sell_qty * price_inr < 100:
+                send_telegram(
+                    f"SELL S{next_sell} skipped\n"
+                    f"total_btc Rs.{price_inr:,.2f} | Notional Rs.{total_btc*price_inr:.2f} < Rs.100 min\n"
+                    "Deposit more funds or wait for BTC price to rise"
+                )
                 return
 
             try:
@@ -3036,7 +3043,7 @@ def check_auto_trading(price_inr: float):
                 send_telegram(f"SELL S{next_sell} error: {sell_err}")
                 return
             if order["status"] not in ("filled",):
-                send_telegram(f"⚠️ SELL S{next_sell} not filled — {order['status']}. Retrying next cycle.")
+                send_telegram(f"⚠️ SELL S{next_sell} not filled - {order['status']}. Retrying next cycle.")
                 return
 
             sold_btc      = order["filled_qty"]
