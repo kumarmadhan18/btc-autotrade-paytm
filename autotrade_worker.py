@@ -1000,7 +1000,7 @@ def _send_heartbeat(btc_balance, inr_balance, avg_buy, price_inr,
 
     _last_tg_state = cur_state
     _last_tg_time  = time.time()
-    tag = "State Update" if state_changed else "2h Heartbeat"
+    tag = "📈 State Update" if state_changed else "2h Heartbeat"
 
     # ── HOLDING BTC ──────────────────────────────────────────────────────────
     if btc_balance >= COINDCX_MIN_BTC_QTY and avg_buy > 0:
@@ -1499,8 +1499,11 @@ def main():
     log("🚀 autotrade_worker.py v2.0 started")
     send_telegram(
         "Auto-Trade Worker started - DCA Strategy\n"
-        "BUY:  B1=immediate(10%) | B2=-2.8%(25%) | B3=-3.5%(50%) | Reserve 15%\n"
-        "SELL: S1=+2.8% | S2=+3.5% | S3=+4.0% (all from latest buy price)\n"
+        "BUY:  B1=-2.8% | B2=-3.5% | B3=-4.0% from last sell price\n"
+        "      INR split: B1=10% B2=25% B3=50% | Reserve=15%\n"
+        "      Exception: B1 fires immediately on very first trade only\n"
+        "SELL: S1=+2.8% | S2=+3.5% | S3=+4.0% from latest buy price\n"
+        "      BTC split: S1=25% S2=35% S3=40%\n"
         "Commands: /stop | /start | /status"
     )
 
