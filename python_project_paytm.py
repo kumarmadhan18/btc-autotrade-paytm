@@ -2942,7 +2942,9 @@ def check_auto_trading(price_inr: float):
             elif inr_balance >= min_trade_inr:
                 nb = buy_stage + 1
                 if nb == 1:
-                    buy_info = "B1 fires immediately (10% INR)"
+                    buy_info = ("B1 INITIAL — fires immediately (first ever trade)"
+                               if last_sell_px == 0 else
+                               f"B1 Rs.{round(last_sell_px*(1-BUY_STAGES[0][0]/100),2):,.2f} (-{BUY_STAGES[0][0]}%)")
                 elif nb <= len(BUY_STAGES) and last_sell_px > 0:
                     all_buys = " | ".join(
                         f"B{j+1} Rs.{round(last_sell_px*(1-BUY_STAGES[j][0]/100),2):,.2f} (-{BUY_STAGES[j][0]}%)"
@@ -3040,10 +3042,10 @@ def check_auto_trading(price_inr: float):
             try:
                 order = place_market_sell(sell_qty)
             except Exception as sell_err:
-                send_telegram(f"SELL S{next_sell} error: {sell_err}")
+                send_telegram(f"🔒 SELL S{next_sell} error: {sell_err}")
                 return
             if order["status"] not in ("filled",):
-                send_telegram(f"⚠️ SELL S{next_sell} not filled - {order['status']}. Retrying next cycle.")
+                send_telegram(f"🔒 SELL S{next_sell} not filled - {order['status']}. Retrying next cycle.")
                 return
 
             sold_btc      = order["filled_qty"]
@@ -3113,9 +3115,13 @@ def check_auto_trading(price_inr: float):
         # ╚══════════════════════════════════════════════════════════════╝
         if btc_balance < COINDCX_MIN_BTC_QTY and inr_balance >= min_trade_inr:
 
-            # ── Determine next buy stage ──────────────────────────────────────
-            # buy_stage=0 → next_buy=1 (Stage 1 = initial buy, fires immediately)
-            # Stages 2 & 3 wait for dips from the Stage 1 buy price.
+            # ── Buy stage trigger logic ───────────────────────────────────────
+            # ALL buy stages wait for price to dip from last sell price.
+            # Exception: very first trade ever (no last_sell_px) fires B1 immediately.
+            #
+            # B1: price <= last_sell * (1 - 2.8%) → spend 10% INR
+            # B2: price <= last_sell * (1 - 3.5%) → spend 25% INR
+            # B3: price <= last_sell * (1 - 4.0%) → spend 50% INR
             next_buy = buy_stage + 1
 
             if next_buy > len(BUY_STAGES):
@@ -3123,24 +3129,31 @@ def check_auto_trading(price_inr: float):
 
             next_dip_pct, next_inr_pct = BUY_STAGES[next_buy - 1]
 
-            # Stage 1: fire immediately at current price — no dip required
-            # Stages 2 & 3: wait for dip from Stage 1 buy price
-            if next_buy == 1:
+            # Resolve last sell reference
+            if last_sell_px == 0:
+                last_sell_px = last_inr_value if last_inr_value > 0 else 0
+                if last_sell_px > 0:
+                    save_dca_state(last_sell_price_btc=last_sell_px)
+
+            is_first_trade = (last_sell_px == 0 and next_buy == 1)
+
+            if is_first_trade:
                 buy_trigger = price_inr
-                label = "INITIAL"
+                label = "INITIAL (first trade)"
             else:
                 if last_sell_px == 0:
-                    last_sell_px = last_inr_value
-                    if last_sell_px > 0:
-                        save_dca_state(last_sell_price_btc=last_sell_px)
-                if last_sell_px == 0:
-                    return  # no Stage 1 reference price yet
+                    send_telegram(
+                        f'⏳ Waiting for B{next_buy} buy trigger\n'
+                        f'🔒 No last sell price | Now Rs.{price_inr:,.2f}'
+                    )
+                    return
                 buy_trigger = round(last_sell_px * (1 - next_dip_pct / 100), 2)
-                label = f"DCA -{next_dip_pct}%"
+                label = f"B{next_buy} at -{next_dip_pct}% from last sell"
 
-            if next_buy > 1 and price_inr > buy_trigger:
-                print(f"⏳ DCA B{next_buy} trigger ₹{buy_trigger:,.2f} (-{next_dip_pct}% from "
-                      f"₹{last_sell_px:,.2f}) | Now ₹{price_inr:,.2f} | Buy stage {buy_stage}/3")
+            if not is_first_trade and price_inr > buy_trigger:
+                print(f"⏳ Waiting: B{next_buy} trigger Rs.{buy_trigger:,.2f} "
+                      f"(-{next_dip_pct}% from sell Rs.{last_sell_px:,.2f}) | "
+                      f"Now Rs.{price_inr:,.2f}")
                 return  # price not low enough yet
 
             # ── Calculate INR to spend ────────────────────────────────────────

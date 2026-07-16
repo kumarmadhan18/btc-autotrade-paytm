@@ -102,8 +102,6 @@ ENABLE_NOTIFICATIONS = os.getenv("ENABLE_NOTIFICATIONS", "true").lower() == "tru
 
 COINDCX_MIN_BTC_QTY   = 0.00001   # actual min from CoinDCX markets_details
 POLL_INTERVAL         = 30         # seconds between each trade check
-DEFAULT_TARGET_PCT    = 1.5        # 1.354% breakeven + 0.15% net profit
-DEFAULT_STOP_LOSS_PCT = 2.0
 DEFAULT_DAILY_LOSS_LIMIT = 5.0
 
 # ── DCA Stage Config ──────────────────────────────────────────────────────────
@@ -1051,25 +1049,32 @@ def _send_heartbeat(btc_balance, inr_balance, avg_buy, price_inr,
     # ── HOLDING INR ──────────────────────────────────────────────────────────
     elif inr_balance >= min_trade_inr:
         nb = buy_stage + 1
-        if nb == 1:
-            buy_info = f"B1 fires immediately (10% INR ~ Rs.{round(inr_balance*0.085):,})"
-        elif nb <= len(BUY_STAGES) and last_sell_px > 0:
-            dip_pct  = BUY_STAGES[nb - 1][0]
-            inr_pct  = int(BUY_STAGES[nb - 1][1] * 100)
-            buy_at   = round(last_sell_px * (1 - dip_pct / 100), 2)
-            buy_info = f"B{nb} @ Rs.{buy_at:,.2f} (-{dip_pct}% from last sell) -> {inr_pct}% INR"
+        is_first = (last_sell_px == 0 and nb == 1)
+        if is_first:
+            buy_info = "B1 INITIAL — fires immediately (first ever trade, no sell history)"
+        elif last_sell_px > 0 and nb <= len(BUY_STAGES):
+            # All stages wait for dip from last sell price
+            all_buys = " | ".join(
+                f"B{j+1} Rs.{round(last_sell_px*(1-BUY_STAGES[j][0]/100),2):,.2f} (-{BUY_STAGES[j][0]}%)"
+                for j in range(buy_stage, len(BUY_STAGES))
+            )
+            buy_info = all_buys
+        elif nb > len(BUY_STAGES):
+            buy_info = "All buy stages deployed — waiting for price to rise for sells"
         else:
-            buy_info = "All buy stages done - waiting for price recovery"
+            buy_info = "Waiting — no last sell price recorded yet"
 
-        ref_line = f"Last sell ref: Rs.{last_sell_px:,.2f}" if last_sell_px > 0 else "First trade - no sell ref yet"
+        ref_line = (f"Last sell: Rs.{last_sell_px:,.2f}"
+                    if last_sell_px > 0 else "No sell history yet")
+        sell_s1 = round(last_sell_px * (1 - BUY_STAGES[0][0]/100), 2) if last_sell_px > 0 else 0
         msg = (
             f"{tag}\n"
-            f"Holding Rs.{inr_balance:,.2f} INR\n"
+            f"Holding Rs.{inr_balance:,.2f} INR | Reserve Rs.{round(inr_balance*INR_RESERVE,2):,.2f}\n"
             f"Buy stage {buy_stage}/3 | Sell stage {sell_stage}/3\n"
             f"{ref_line} | Now Rs.{price_inr:,.2f}\n"
-            f"Next buy: {buy_info}\n"
-            f"After buy: S1 immediate, S2 +{SELL_STAGES[1][0]}%, S3 +{SELL_STAGES[2][0]}%\n"
-            f"Reserve: 15% INR always kept"
+            f"Buy triggers: {buy_info}\n"
+            f"After buy: S1 +{SELL_STAGES[0][0]}% | S2 +{SELL_STAGES[1][0]}% | S3 +{SELL_STAGES[2][0]}%\n"
+            f"INR per stage: B1={int(BUY_STAGES[0][1]*100)}% | B2={int(BUY_STAGES[1][1]*100)}% | B3={int(BUY_STAGES[2][1]*100)}% of deployable"
         )
         send_telegram(msg)
 
@@ -1328,28 +1333,29 @@ def run_trade_cycle(price_inr: float):
     # ══════════════════════════════════════════════════════════════════════════
     # STATE B — Holding INR → STAGED DCA BUY
     #
-    #   INITIAL BUY (no prior trade):
-    #     Stage 1: buy 10% of INR immediately at current price (no dip wait)
-    #     Keep 15% reserve for further DCA if price drops.
-    #
-    #   DCA BUY (after a sell):
-    #     Stage 1: price drops 3% from last sell → spend 10% of total INR
-    #     Stage 2: price drops 6% from last sell → spend 25% of total INR
-    #     Stage 3: price drops 9% from last sell → spend 50% of total INR
-    #     Reserve: always keep 15% in INR
+    #   ALL BUY STAGES wait for price to dip from last sell price:
+    #     B1: price <= last_sell * (1 - 2.8%) → spend 10% of INR
+    #     B2: price <= last_sell * (1 - 3.5%) → spend 25% of INR
+    #     B3: price <= last_sell * (1 - 4.0%) → spend 50% of INR
+    #     Reserve: always keep 15% of INR
+    #   EXCEPTION: very first trade ever (no sell history) → B1 fires immediately
     #
     #   avg_buy_price is recalculated as weighted average after each DCA buy.
     # ══════════════════════════════════════════════════════════════════════════
     if btc_balance < COINDCX_MIN_BTC_QTY and inr_balance >= min_trade_inr:
 
-        # ── Determine next buy stage ──────────────────────────────────────────
-        # buy_stage=0 means no buy has happened yet → next_buy=1 (Stage 1)
-        # Stage 1 fires immediately at current price (no dip wait) — this IS
-        # the initial buy. Stages 2 and 3 wait for dips from the Stage 1 price.
+        # ── Buy stage trigger logic ───────────────────────────────────────────
+        # ALL buy stages wait for price to dip below last sell price.
+        # Exception: very first trade ever (no last_sell_px at all) fires immediately.
+        #
+        # B1: price <= last_sell * (1 - 2.8%) → spend 10% INR
+        # B2: price <= last_sell * (1 - 3.5%) → spend 25% INR
+        # B3: price <= last_sell * (1 - 4.0%) → spend 50% INR
+        # Reserve: 15% INR always kept back
         next_buy = buy_stage + 1
 
         if next_buy > len(BUY_STAGES):
-            log(f"⏳ All {len(BUY_STAGES)} DCA buy stages done. Waiting for price recovery.")
+            log(f"⏳ All {len(BUY_STAGES)} DCA buy stages deployed. Waiting for price to rise for sells.")
             _send_heartbeat(btc_balance, inr_balance, avg_buy, price_inr,
                             0, min_trade_inr, last_type, last_inr_value,
                             sell_stage, buy_stage, 0, last_sell_px)
@@ -1357,32 +1363,38 @@ def run_trade_cycle(price_inr: float):
 
         next_dip_pct, next_inr_pct = BUY_STAGES[next_buy - 1]
 
-        # ── Stage 1 (initial buy): fire immediately at current market price ──
-        # ── Stages 2 & 3: wait for price to dip from Stage 1 buy price ───────
-        if next_buy == 1:
-            # No dip required — buy right now
+        # Resolve last sell reference price
+        if last_sell_px == 0:
+            # Try recovering from last trade record
+            last_sell_px = last_inr_value if last_inr_value > 0 else 0
+            if last_sell_px > 0:
+                save_dca_state(last_sell_price_btc=last_sell_px)
+
+        # First ever trade — no sell history at all → fire B1 immediately
+        is_first_trade = (last_sell_px == 0 and last_type == "" and next_buy == 1)
+
+        if is_first_trade:
             buy_trigger = price_inr
-            label = "INITIAL"
+            label = "INITIAL (first trade)"
         else:
-            # Use Stage 1 buy price as the dip reference (stored in last_sell_px
-            # after Stage 1, or fall back to last_inr_value from wallet_transactions)
             if last_sell_px == 0:
-                last_sell_px = last_inr_value
-                if last_sell_px > 0:
-                    save_dca_state(last_sell_price_btc=last_sell_px)
-            if last_sell_px == 0:
-                log("⚠️ No Stage 1 reference price yet — waiting.")
+                log('No last sell price — cannot determine buy trigger. Waiting.')
+                send_telegram(
+                    f'Waiting for buy trigger\n'
+                    f'No last sell price recorded | Now Rs.{price_inr:,.2f} | B-stage {buy_stage}/3'
+                )
                 return
             buy_trigger = round(last_sell_px * (1 - next_dip_pct / 100), 2)
-            label = f"DCA -{next_dip_pct}%"
+            label = f'B{next_buy} at -{next_dip_pct}% from last sell Rs.{last_sell_px:,.2f}'
 
         _send_heartbeat(btc_balance, inr_balance, avg_buy, price_inr,
                         0, min_trade_inr, last_type, last_inr_value,
                         sell_stage, buy_stage, buy_trigger, last_sell_px)
 
-        if next_buy > 1 and price_inr > buy_trigger:
-            log(f"⏳ DCA B{next_buy} trigger ₹{buy_trigger:,.2f} (-{next_dip_pct}% from "
-                f"₹{last_sell_px:,.2f}) | Now ₹{price_inr:,.2f} | Buy stage {buy_stage}/3")
+        if not is_first_trade and price_inr > buy_trigger:
+            log(f"Waiting: B{next_buy} trigger Rs.{buy_trigger:,.2f} "
+                f"(-{next_dip_pct}% from sell Rs.{last_sell_px:,.2f}) | "
+                f"Now Rs.{price_inr:,.2f}")
             return  # price not low enough yet
 
         # ── Calculate INR to spend ────────────────────────────────────────────
@@ -1566,17 +1578,20 @@ def main():
                                 next_act = "All sell stages done"
                         elif inr_bal >= 500:
                             nb = b_stage + 1
-                            if nb == 1:
-                                next_act = "BUY B1 fires immediately (10% INR)"
-                            elif nb <= len(BUY_STAGES) and last_px > 0:
-                                # Show all upcoming buy targets
+                            is_first = (last_px == 0 and nb == 1)
+                            if is_first:
+                                next_act = "BUY B1 INITIAL — fires immediately (first ever trade)"
+                            elif last_px > 0 and nb <= len(BUY_STAGES):
+                                # All stages wait for dip from last sell price
                                 all_tgts = " | ".join(
                                     f"B{j+1} Rs.{round(last_px*(1-BUY_STAGES[j][0]/100),2):,.2f} (-{BUY_STAGES[j][0]}%)"
                                     for j in range(b_stage, len(BUY_STAGES))
                                 )
-                                next_act = f"BUY: {all_tgts}"
+                                next_act = f"BUY triggers: {all_tgts}"
+                            elif nb > len(BUY_STAGES):
+                                next_act = "All buy stages deployed — waiting for price recovery to sell"
                             else:
-                                next_act = "Waiting for price recovery"
+                                next_act = "Waiting — no last sell price recorded"
                         else:
                             next_act = "WARNING: Insufficient balance"
 
