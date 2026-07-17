@@ -1594,7 +1594,9 @@ def main():
                         else:
                             prev_line  = "Last trade : None"
 
-                        avg_line  = f"Rs.{avg_buy:,.2f}" if avg_buy  else "Not set"
+                        eff_avg   = avg_buy if avg_buy > 0 else entry
+                        avg_line  = f"Rs.{eff_avg:,.2f}" if eff_avg else "Not set"
+                        buy_ref   = eff_avg  # use for sell targets below
                         last_line = f"Rs.{last_px:,.2f}" if last_px  else "None"
                         buy_line  = f"Rs.{buy_ref:,.2f}" if buy_ref  else "Not set"
 
