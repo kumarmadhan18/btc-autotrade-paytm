@@ -1209,128 +1209,115 @@ def run_trade_cycle(price_inr: float):
     #   S3: price >= latest_buy * 1.09 (+9%) → sell 40% BTC
     #   All targets from entry_price (actual buy fill price). No stop-loss.
     # ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
+    # STATE A — Holding BTC → check sell targets AND DCA buy triggers
+    #
+    # SELL: S1=+2.8%, S2=+3.5%, S3=+4.0% from latest buy price
+    # DCA BUY: B2=-3.5%, B3=-4.0% from last sell price (runs even while holding BTC)
+    #
+    # Key rule: bot can hold BTC AND buy more if price dips enough.
+    # If price is below sell target, fall through to buy check.
+    # ══════════════════════════════════════════════════════════════════════════
     if btc_balance >= COINDCX_MIN_BTC_QTY:
 
         if avg_buy == 0:
             avg_buy = price_inr
             save_dca_state(avg_buy_price=avg_buy)
             save_entry_price(avg_buy)
-            log(f"📌 avg_buy seeded to current price ₹{avg_buy:,.2f}")
-            return
+            log(f"📌 avg_buy seeded to current price Rs.{avg_buy:,.2f}")
+            # Don't return — fall through to buy check
 
-        next_sell = sell_stage + 1
-        if next_sell > len(SELL_STAGES):
-            log("⚠️ All sell stages complete but still holding BTC — waiting for DCA reset.")
-            return
+        if avg_buy > 0:
+            next_sell = sell_stage + 1
+            if next_sell <= len(SELL_STAGES):
+                next_rise_pct, next_btc_pct = SELL_STAGES[next_sell - 1]
+                buy_ref      = entry_price if entry_price > 0 else avg_buy
+                sell_trigger = round(buy_ref * (1 + next_rise_pct / 100), 2)
+                sell_label   = f"+{next_rise_pct}% from buy Rs.{buy_ref:,.2f}"
+                profit_now   = (price_inr - avg_buy) * btc_balance
 
-        next_rise_pct, next_btc_pct = SELL_STAGES[next_sell - 1]
+                log(f"Buy ref Rs.{buy_ref:,.2f} | S{next_sell} target Rs.{sell_trigger:,.2f} "
+                    f"| P&L Rs.{profit_now:+.2f} | Now Rs.{price_inr:,.2f}")
 
-        # ALL sell stages use latest buy price (entry_price) as reference.
-        # S1: price >= buy * 1.03 (+3%)
-        # S2: price >= buy * 1.06 (+6%)
-        # S3: price >= buy * 1.09 (+9%)
-        buy_ref      = entry_price if entry_price > 0 else avg_buy
-        sell_trigger = round(buy_ref * (1 + next_rise_pct / 100), 2)
-        sell_label   = f"+{next_rise_pct}% from buy Rs.{buy_ref:,.2f}"
+                _send_heartbeat(btc_balance, inr_balance, avg_buy, price_inr,
+                                next_rise_pct, min_trade_inr, last_type, last_inr_value,
+                                sell_stage, buy_stage, sell_trigger, buy_ref)
 
-        profit_now = (price_inr - avg_buy) * btc_balance
-        log(f"📊 Buy ref Rs.{buy_ref:,.2f} | S{next_sell} [{sell_label}] "
-            f"target Rs.{sell_trigger:,.2f} | P&L Rs.{profit_now:+.2f} "
-            f"| Now Rs.{price_inr:,.2f} | Sell stage {sell_stage}/3")
+                if price_inr >= sell_trigger:
+                    # ── Execute sell ──────────────────────────────────────────
+                    raw_qty  = btc_balance * next_btc_pct
+                    sell_qty = math.floor(raw_qty / 0.00001) * 0.00001
+                    sell_qty = round(sell_qty, 5)
 
-        _send_heartbeat(btc_balance, inr_balance, avg_buy, price_inr,
-                        next_rise_pct, min_trade_inr, last_type, last_inr_value,
-                        sell_stage, buy_stage, sell_trigger, buy_ref)
+                    if sell_qty * price_inr < 100 or sell_qty < COINDCX_MIN_BTC_QTY:
+                        log(f"Notional too low for {int(next_btc_pct*100)}% — escalating to full balance")
+                        sell_qty = math.floor(btc_balance / 0.00001) * 0.00001
+                        sell_qty = round(sell_qty, 5)
 
-        if price_inr < sell_trigger:
-            return  # not at target yet — hold
+                    if sell_qty < COINDCX_MIN_BTC_QTY or sell_qty * price_inr < 100:
+                        log(f"SELL S{next_sell} skipped — BTC {btc_balance:.5f} notional Rs.{btc_balance*price_inr:.2f} < Rs.100 min")
+                        send_telegram(
+                            f"SELL S{next_sell} skipped\n"
+                            f"BTC {btc_balance:.5f} notional Rs.{btc_balance*price_inr:.2f} < Rs.100 min\n"
+                            "Deposit more funds or wait for price to rise"
+                        )
+                        return
 
-        # ── Execute sell stage ────────────────────────────────────────────────
-        # Floor to 5 decimal places (CoinDCX requirement).
-        # If pct-based qty notional < Rs.100 min, escalate to full balance.
-        # This handles small BTC holdings where 25% is below the order minimum.
-        raw_qty  = btc_balance * next_btc_pct
-        sell_qty = math.floor(raw_qty / 0.00001) * 0.00001
-        sell_qty = round(sell_qty, 5)
+                    log(f"SELL Stage {next_sell}/3 [{sell_label}] — selling {sell_qty:.5f} BTC")
 
-        # Check notional — if too small, use full balance instead
-        if sell_qty * price_inr < 100 or sell_qty < COINDCX_MIN_BTC_QTY:
-            log(f"Notional too low for {int(next_btc_pct*100)}% — escalating to full BTC balance")
-            sell_qty = math.floor(btc_balance / 0.00001) * 0.00001
-            sell_qty = round(sell_qty, 5)
+                    try:
+                        order = place_sell_order(sell_qty, price_inr)
+                    except ValueError as e:
+                        log(f"SELL S{next_sell} skipped: {e}")
+                        send_telegram(f"SELL S{next_sell} skipped: {e}")
+                        return
 
-        # If even full balance is below minimum, skip with clear message
-        if sell_qty < COINDCX_MIN_BTC_QTY or sell_qty * price_inr < 100:
-            log(f"SELL S{next_sell} skipped -  — full BTC {btc_balance:.5f} notional Rs.{btc_balance*price_inr:.2f} still below Rs.100 min.")
-            send_telegram(
-                f"SELL S{next_sell} skipped\n"
-                f"btc_balance Rs.{price_inr:,.2f} | Notional Rs.{btc_balance*price_inr:.2f} < Rs.100 min\n"
-                "Deposit more funds or wait for BTC price to rise"
-            )
-            return
+                    if order["status"] != "filled":
+                        send_telegram(f"SELL S{next_sell} not filled — {order['status']}. Retrying.")
+                        return
 
-        log(f"🔔 SELL Stage {next_sell}/3 [{sell_label}] — "
-            f"selling {sell_qty:.6f} BTC ({int(next_btc_pct*100)}% of holdings)...")
+                    avg_price     = order["avg_price"]
+                    sold_btc      = order["filled_qty"]
+                    fee           = order["fee"]
+                    inr_received  = (sold_btc * avg_price) - fee
+                    roi_pct       = ((avg_price - avg_buy) / avg_buy) * 100
+                    actual_profit = inr_received - (avg_buy * sold_btc)
+                    new_btc       = max(0.0, btc_balance - sold_btc)
 
-        try:
-            order = place_sell_order(sell_qty, price_inr)
-        except ValueError as e:
-            log(f"⚠️ SELL S{next_sell} skipped: {e}")
-            send_telegram(f"⚠️ SELL S{next_sell} skipped: {e}")
-            return
+                    _new_inr, _, _ok = get_live_balances()
+                    new_inr = _new_inr if _ok else (inr_balance + inr_received)
 
-        if order["status"] != "filled":
-            send_telegram(f"⚠️ SELL S{next_sell} not filled — {order['status']}. Retrying next cycle.")
-            return
+                    log_wallet_transaction("AUTO_SELL", sold_btc, new_btc, avg_price, f"AUTO_SELL_S{next_sell}")
+                    log_inr_transaction("AUTO_SELL", inr_received, new_inr)
+                    save_trade_log(f"AUTO_SELL_S{next_sell}", sold_btc, avg_price, roi_pct)
+                    _worker_status["trades"] += 1
 
-        avg_price    = order["avg_price"]
-        sold_btc     = order["filled_qty"]
-        fee          = order["fee"]
-        inr_received = (sold_btc * avg_price) - fee
-        roi_pct      = ((avg_price - avg_buy) / avg_buy) * 100
-        actual_profit= inr_received - (avg_buy * sold_btc)
-        new_btc      = max(0.0, btc_balance - sold_btc)
+                    save_dca_state(sell_stage=next_sell, last_sell_price_btc=avg_price)
 
-        _new_inr, _, _ok = get_live_balances()
-        new_inr = (_new_inr if _ok else (inr_balance + inr_received))
+                    if next_sell >= len(SELL_STAGES):
+                        clear_entry_price()
+                        reset_dca_state()
+                        save_dca_state(last_sell_price_btc=avg_price)
+                        completion = "All 3 sell stages complete - watching for next buy dip"
+                    else:
+                        next_s       = SELL_STAGES[next_sell]
+                        next_trigger = round(buy_ref * (1 + next_s[0] / 100), 2)
+                        remaining    = sum(pct for _, pct in SELL_STAGES[next_sell:])
+                        completion   = (f"Next S{next_sell+1} @ Rs.{next_trigger:,.2f} "
+                                        f"(+{next_s[0]}% from buy Rs.{buy_ref:,.2f}) "
+                                        f"| {int(remaining*100)}% BTC remaining")
 
-        log_wallet_transaction("AUTO_SELL", sold_btc, new_btc, avg_price,
-                               f"AUTO_SELL_S{next_sell}")
-        log_inr_transaction("AUTO_SELL", inr_received, new_inr)
-        save_trade_log(f"AUTO_SELL_S{next_sell}", sold_btc, avg_price, roi_pct)
-        _worker_status["trades"] += 1
+                    send_telegram(
+                        f"🟢 AUTO SELL S{next_sell}/3 [{sell_label}]\n"
+                        f"  Sold: {sold_btc:.5f} BTC @ Rs.{avg_price:,.2f}\n"
+                        f"  Received: Rs.{inr_received:,.2f}\n"
+                        f"  Avg buy: Rs.{avg_buy:,.2f} | Profit: Rs.{actual_profit:+.2f}\n"
+                        f"  ROI: {roi_pct:+.2f}%\n"
+                        f"  {completion}"
+                    )
+                    return
+                # else: price < sell_trigger → fall through to DCA buy check below
 
-        new_sell_stage = next_sell
-        # Always save latest sell price — used by buy B2/B3 dip triggers
-        save_dca_state(sell_stage=new_sell_stage, last_sell_price_btc=avg_price)
-
-        if new_sell_stage >= len(SELL_STAGES):
-            # All 3 stages sold — full reset
-            clear_entry_price()
-            reset_dca_state()
-            save_dca_state(last_sell_price_btc=avg_price)   # keep for next buy dip ref
-            completion = "All 3 sell stages complete - watching for next buy dip"
-        else:
-            # Partial sell — keep entry_price so S2/S3 targets stay correct
-            remaining_pct = sum(p for _, p in SELL_STAGES[new_sell_stage:])
-            next_s        = SELL_STAGES[new_sell_stage]
-            # Next target is from the ORIGINAL buy ref (entry_price), not this sell
-            next_trigger  = round(buy_ref * (1 + next_s[0] / 100), 2)
-            completion    = (f"Next S{new_sell_stage+1} @ Rs.{next_trigger:,.2f} "
-                             f"(+{next_s[0]}% from buy Rs.{buy_ref:,.2f}) "
-                             f"| {int(remaining_pct*100)}% BTC still holding")
-
-        send_telegram(
-            f"🟢 AUTO SELL S{next_sell}/3 [{sell_label}]\n"
-            f"  Sold: {sold_btc:.5f} BTC @ Rs.{avg_price:,.2f}\n"
-            f"  Received: Rs.{inr_received:,.2f}\n"
-            f"  Avg buy: Rs.{avg_buy:,.2f} | Profit: Rs.{actual_profit:+.2f}\n"
-            f"  ROI: {roi_pct:+.2f}%\n"
-            f"  {completion}"
-        )
-        return
-
-    # ══════════════════════════════════════════════════════════════════════════
     # STATE B — Holding INR → STAGED DCA BUY
     #
     #   ALL BUY STAGES wait for price to dip from last sell price:
