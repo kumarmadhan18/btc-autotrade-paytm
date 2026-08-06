@@ -2835,7 +2835,7 @@ def check_auto_trading(price_inr: float):
             return
 
         # ── Minimum trade size to satisfy CoinDCX ───────────────
-        min_trade_inr = max(500.0, round(COINDCX_MIN_BTC_QTY * price_inr * 1.05, 2))
+        min_trade_inr = max(100.0, round(COINDCX_MIN_BTC_QTY * price_inr * 1.05, 2))  # Rs.100 = CoinDCX actual minimum
 
         # ── Daily loss limit guard ───────────────────────────────
         daily_loss_limit_pct = float(st.session_state.get("cfg_daily_loss_limit", DEFAULT_DAILY_LOSS_LIMIT))
@@ -2960,7 +2960,7 @@ def check_auto_trading(price_inr: float):
                 )
 
         # ══ WALLET REALITY OVERRIDE — purely balance-based ══════════════
-        low_inr = inr_balance < min_trade_inr
+        low_inr = inr_balance < 100  # below CoinDCX absolute minimum
         has_btc = btc_balance >= COINDCX_MIN_BTC_QTY
         no_btc  = not has_btc
 
@@ -3107,7 +3107,7 @@ def check_auto_trading(price_inr: float):
         # ║  Always keep 15% INR in reserve                              ║
         # ║  Stage 1 = initial buy: fires immediately at current price     ║
         # ╚══════════════════════════════════════════════════════════════╝
-        if btc_balance < COINDCX_MIN_BTC_QTY and inr_balance >= min_trade_inr:
+        if btc_balance < COINDCX_MIN_BTC_QTY and inr_balance >= 100:
 
             # ── Buy stage trigger logic ───────────────────────────────────────
             # ALL buy stages wait for price to dip from last sell price.
@@ -3154,15 +3154,15 @@ def check_auto_trading(price_inr: float):
             deployable = inr_balance * (1 - INR_RESERVE)
             buy_inr    = round(deployable * next_inr_pct, 2)
 
-            if buy_inr < min_trade_inr:
-                buy_inr = min_trade_inr
+            if buy_inr < 100:
+                buy_inr = 100  # enforce CoinDCX minimum
             max_allowed = max(0.0, inr_balance - (inr_balance * INR_RESERVE))
             buy_inr     = min(buy_inr, round(max_allowed, 2))
 
-            if buy_inr < min_trade_inr:
+            if buy_inr < 100:
                 send_telegram(
-                    f"⚠️ DCA B{next_buy} skipped — only ₹{buy_inr:.2f} deployable "
-                    f"(need ₹{min_trade_inr:.2f}). Reserve: ₹{inr_balance * INR_RESERVE:.2f}"
+                    f"⚠️ DCA B{next_buy} skipped — spend Rs.{buy_inr:.2f} < Rs.100 min\n"
+                    f"INR: Rs.{inr_balance:.2f} | Reserve: Rs.{round(inr_balance*INR_RESERVE,2):.2f}"
                 )
                 return
 

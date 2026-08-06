@@ -1047,7 +1047,7 @@ def _send_heartbeat(btc_balance, inr_balance, avg_buy, price_inr,
         send_telegram(msg)
 
     # ── HOLDING INR ──────────────────────────────────────────────────────────
-    elif inr_balance >= min_trade_inr:
+    elif inr_balance >= 100:  # CoinDCX minimum order
         nb = buy_stage + 1
         is_first = (last_sell_px == 0 and nb == 1)
         if is_first:
@@ -1173,7 +1173,7 @@ def run_trade_cycle(price_inr: float):
     #   → Cannot sell more. Skip remaining sell stages. Jump to BUY mode.
     #   → Reset sell_stage so buy triggers use last_sell_px correctly.
     # ══════════════════════════════════════════════════════════════════════════
-    low_inr = inr_balance < min_trade_inr
+    low_inr = inr_balance < 100  # below CoinDCX absolute minimum
     has_btc = btc_balance >= COINDCX_MIN_BTC_QTY
     no_btc  = not has_btc
 
@@ -1329,7 +1329,7 @@ def run_trade_cycle(price_inr: float):
     #
     #   avg_buy_price is recalculated as weighted average after each DCA buy.
     # ══════════════════════════════════════════════════════════════════════════
-    if btc_balance < COINDCX_MIN_BTC_QTY and inr_balance >= min_trade_inr:
+    if btc_balance < COINDCX_MIN_BTC_QTY and inr_balance >= 100:
 
         # ── Buy stage trigger logic ───────────────────────────────────────────
         # ALL buy stages wait for price to dip below last sell price.
@@ -1388,16 +1388,15 @@ def run_trade_cycle(price_inr: float):
         deployable = inr_balance * (1 - INR_RESERVE)
         buy_inr    = round(deployable * next_inr_pct, 2)
 
-        if buy_inr < min_trade_inr:
-            buy_inr = min_trade_inr
+        # floor already applied above — don't override with min_trade_inr
         max_allowed = max(0.0, inr_balance - (inr_balance * INR_RESERVE))
         buy_inr     = min(buy_inr, round(max_allowed, 2))
 
-        if buy_inr < min_trade_inr:
-            log(f"⚠️ B{next_buy} skipped — deployable ₹{buy_inr:.2f} < minimum ₹{min_trade_inr:.2f}")
+        if buy_inr < 100:
+            log(f"⚠️ B{next_buy} skipped — spend Rs.{buy_inr:.2f} < Rs.100 CoinDCX minimum")
             send_telegram(
-                f"⚠️ DCA B{next_buy} skipped — only ₹{buy_inr:.2f} deployable "
-                f"(need ₹{min_trade_inr:.2f}). Reserve: ₹{inr_balance * INR_RESERVE:.2f}"
+                f"⚠️ B{next_buy} skipped — only Rs.{buy_inr:.2f} deployable\n"
+                f"Need Rs.100 minimum | INR: Rs.{inr_balance:.2f} | Reserve: Rs.{round(inr_balance*INR_RESERVE,2):.2f}"
             )
             return
 
