@@ -1920,6 +1920,187 @@ def _poll_order_status(order_id: str, max_wait: int = 120) -> dict:
         return data
 
 
+# ─────────────────────────────────────────
+# State Reconciliation — recovers real avg_buy/stages from CoinDCX itself
+# ─────────────────────────────────────────
+def get_exchange_trade_history(symbol: str = "BTCINR", limit: int = 20):
+    """
+    Pulls actual recent fills straight from CoinDCX — bypasses local DB
+    entirely. Source of truth even if trade_state/dca_state tables get wiped.
+    """
+    body = {"symbol": symbol, "limit": limit, "sort": "desc"}
+    try:
+        result = _coindcx_signed_request("/exchange/v1/orders/trade_history", body)
+        if isinstance(result, list):
+            return result
+        print(f"⚠️ trade_history unexpected shape: {type(result)} — {str(result)[:200]}")
+        return None
+    except Exception as e:
+        print(f"⚠️ trade_history fetch failed: {e}")
+        return None
+
+
+def reconcile_state_from_exchange(buy_stages, sell_stages, recent_n: int = 20, notify: bool = True):
+    """
+    Rebuilds buy_stage, sell_stage, avg_buy_price, last_sell_price_btc from
+    CoinDCX's own fill history instead of defaulting avg_buy to current price.
+
+    Pass in the SAME BUY_STAGES / SELL_STAGES lists your trade cycle uses,
+    since they're defined locally inside that function rather than at
+    module level.
+
+    Call this whenever local DB state is missing/zero but the wallet shows
+    BTC held — never let avg_buy silently default to today's price.
+    """
+    trades = get_exchange_trade_history(limit=recent_n)
+    if not trades:
+        print("⚠️ Could not fetch trade history for reconciliation — DB state unrecoverable this cycle.")
+        return None
+
+    parsed = []
+    for t in trades:
+        try:
+            side  = str(t.get("side") or t.get("type") or "").lower()
+            price = float(t.get("price") or t.get("avg_price") or 0)
+            qty   = float(t.get("quantity") or t.get("total_quantity") or t.get("filled_quantity") or 0)
+            ts    = float(t.get("timestamp") or t.get("created_at") or t.get("time") or 0)
+            if side in ("buy", "sell") and price > 0 and qty > 0:
+                parsed.append({"side": side, "price": price, "qty": qty, "ts": ts})
+        except Exception:
+            continue
+
+    if not parsed:
+        print("⚠️ trade_history returned rows but none parsed — check field names against raw response.")
+        return None
+
+    parsed.sort(key=lambda x: x["ts"])  # oldest → newest
+
+    last_sell_idx = -1
+    for i, t in enumerate(parsed):
+        if t["side"] == "sell":
+            last_sell_idx = i
+
+    since_last_sell = parsed[last_sell_idx + 1:]
+    buys_since_sell = [t for t in since_last_sell if t["side"] == "buy"]
+    last_sell_price = parsed[last_sell_idx]["price"] if last_sell_idx >= 0 else 0.0
+
+    total_qty  = sum(t["qty"] for t in buys_since_sell)
+    total_cost = sum(t["qty"] * t["price"] for t in buys_since_sell)
+    avg_buy    = round(total_cost / total_qty, 2) if total_qty > 0 else 0.0
+
+    buy_stage  = min(len(buys_since_sell), len(buy_stages))
+    sell_stage = 0  # any open BTC position starts sell-checking from S1 again
+
+    save_dca_state(
+        buy_stage=buy_stage,
+        sell_stage=sell_stage,
+        avg_buy_price=avg_buy,
+        last_sell_price_btc=round(last_sell_price, 2),
+    )
+    if avg_buy > 0:
+        save_entry_price(avg_buy)
+
+    summary = {
+        "avg_buy":         avg_buy,
+        "buy_stage":       buy_stage,
+        "sell_stage":      sell_stage,
+        "last_sell_price": round(last_sell_price, 2),
+        "buys_used":       len(buys_since_sell),
+        "trades_seen":     len(parsed),
+    }
+    print(f"🔄 Reconciled from CoinDCX trade history: {summary}")
+    if notify:
+        send_telegram(
+            f"🔄 State reconciled from CoinDCX (DB was empty/stale)\n"
+            f"Real avg buy: Rs.{avg_buy:,.2f} (from {len(buys_since_sell)} buy fill(s) "
+            f"since last sell)\n"
+            f"Buy stage: {buy_stage}/3 | Sell stage: {sell_stage}/3\n"
+            f"Last sell price: Rs.{last_sell_price:,.2f}"
+        )
+    return summary
+
+
+def get_last_sell_price_from_exchange(recent_n: int = 20):
+    """
+    Scans real CoinDCX fills for the most recent SELL, regardless of what
+    local DB state shows. Returns (last_sell_price, exchange_has_any_trades).
+    Use before ever concluding "no sell history = first-ever trade".
+    """
+    trades = get_exchange_trade_history(limit=recent_n)
+    if not trades:
+        return 0.0, False
+
+    parsed = []
+    for t in trades:
+        try:
+            side  = str(t.get("side") or t.get("type") or "").lower()
+            price = float(t.get("price") or t.get("avg_price") or 0)
+            ts    = float(t.get("timestamp") or t.get("created_at") or t.get("time") or 0)
+            if side in ("buy", "sell") and price > 0:
+                parsed.append({"side": side, "price": price, "ts": ts})
+        except Exception:
+            continue
+
+    if not parsed:
+        return 0.0, False
+
+    parsed.sort(key=lambda x: x["ts"])
+    sells = [t for t in parsed if t["side"] == "sell"]
+    if sells:
+        return round(sells[-1]["price"], 2), True
+    return 0.0, True
+
+
+def resync_and_report(price_inr: float, buy_stages, sell_stages) -> str:
+    """
+    Forces a reconciliation from CoinDCX trade history right now, and reports
+    what B1/B2/B3, S1/S2/S3 look like and what the next action will be.
+    Wire this to a "Resync from Exchange" button in the Streamlit UI, or a
+    /resync Telegram command if this bot also polls Telegram commands.
+    """
+    recon = reconcile_state_from_exchange(buy_stages, sell_stages, recent_n=10, notify=False)
+    if not recon:
+        return "❌ Resync failed — could not fetch trade history from CoinDCX. Check API keys/logs."
+
+    avg_buy      = recon["avg_buy"]
+    buy_stage    = recon["buy_stage"]
+    sell_stage   = recon["sell_stage"]
+    last_sell_px = recon["last_sell_price"]
+
+    lines = [
+        f"RESYNC COMPLETE (from last {recon['trades_seen']} CoinDCX fills)",
+        f"Real avg buy price : Rs.{avg_buy:,.2f}" if avg_buy > 0 else "Real avg buy price : none (no open position)",
+        f"Buy stage  : {buy_stage}/3",
+        f"Sell stage : {sell_stage}/3",
+        f"Last sell  : Rs.{last_sell_px:,.2f}" if last_sell_px > 0 else "Last sell  : none recorded",
+        f"Current price : Rs.{price_inr:,.2f}",
+        "--------------------",
+    ]
+
+    if avg_buy > 0 and sell_stage < len(sell_stages):
+        rise_pct, btc_pct = sell_stages[sell_stage]
+        trigger = round(avg_buy * (1 + rise_pct / 100), 2)
+        lines.append(
+            f"NEXT ACTION: SELL S{sell_stage+1} ({int(btc_pct*100)}% of BTC) "
+            f"triggers at Rs.{trigger:,.2f} (+{rise_pct}% from real avg buy)"
+        )
+        if price_inr >= trigger:
+            lines.append("⚡ Trigger already met — bot will sell on next cycle.")
+    elif buy_stage < len(buy_stages) and last_sell_px > 0:
+        dip_pct, inr_pct = buy_stages[buy_stage]
+        trigger = round(last_sell_px * (1 - dip_pct / 100), 2)
+        lines.append(
+            f"NEXT ACTION: BUY B{buy_stage+1} ({int(inr_pct*100)}% of deployable INR) "
+            f"triggers at Rs.{trigger:,.2f} (-{dip_pct}% from last sell)"
+        )
+        if price_inr <= trigger:
+            lines.append("⚡ Trigger already met — bot will buy on next cycle.")
+    else:
+        lines.append("NEXT ACTION: no open position and no last-sell reference — waiting for first buy.")
+
+    return "\n".join(lines)
+
+
 def place_market_buy(buy_inr: float) -> dict:
     """
     Places a real market BUY on CoinDCX (LIVE) or simulated (TEST).
@@ -2365,6 +2546,8 @@ def get_last_any_trade():
             WHERE action IN ('BUY','SELL','AUTO_BUY','AUTO_SELL',
                              'MANUAL_BUY','MANUAL_SELL')
               AND status IN ('filled','partially_filled','SUCCESS','COMPLETED')
+              AND amount > 0
+              AND price > 0
             ORDER BY trade_time DESC LIMIT 1
         """)
         lt = cursor.fetchone()
@@ -2869,12 +3052,22 @@ def check_auto_trading(price_inr: float):
         # ── Restore / seed state when BTC is held ──────────────
         entry_price = float(get_entry_price() or 0)
 
-        # Step 1: recover entry_price from last BUY if missing
+        # Step 1: recover entry_price from last BUY if missing.
+        # If DB has no rows at all (fresh/reset DB), reconcile from CoinDCX's
+        # real trade history instead of falling through to current-price seed.
         if entry_price == 0 and btc_balance >= COINDCX_MIN_BTC_QTY:
             _recovered = get_last_auto_buy_price()
             if _recovered > 0:
                 save_entry_price(_recovered)
                 entry_price = _recovered
+            else:
+                _recon = reconcile_state_from_exchange(BUY_STAGES, SELL_STAGES)
+                if _recon and _recon["avg_buy"] > 0:
+                    entry_price = _recon["avg_buy"]
+                    avg_buy     = _recon["avg_buy"]
+                    buy_stage   = _recon["buy_stage"]
+                    sell_stage  = _recon["sell_stage"]
+                    last_sell_px = _recon["last_sell_price"]
 
         # Step 2: seed avg_buy from entry_price if missing
         if btc_balance >= COINDCX_MIN_BTC_QTY and entry_price > 0 and avg_buy == 0:
@@ -2989,11 +3182,26 @@ def check_auto_trading(price_inr: float):
         if btc_balance >= COINDCX_MIN_BTC_QTY:
 
             if avg_buy == 0:
-                # Recover avg_buy from entry_price — do NOT return, continue to sell
-                avg_buy = entry_price if entry_price > 0 else price_inr
-                save_dca_state(avg_buy_price=avg_buy)
-                if entry_price == 0:
-                    save_entry_price(avg_buy)
+                # DO NOT default to current price — that erases your real cost
+                # basis and can make a real loss look like a logged "profit".
+                if entry_price > 0:
+                    avg_buy = entry_price
+                    save_dca_state(avg_buy_price=avg_buy)
+                else:
+                    _recon = reconcile_state_from_exchange(BUY_STAGES, SELL_STAGES)
+                    if _recon and _recon["avg_buy"] > 0:
+                        avg_buy    = _recon["avg_buy"]
+                        buy_stage  = _recon["buy_stage"]
+                        sell_stage = _recon["sell_stage"]
+                    else:
+                        avg_buy = price_inr
+                        save_dca_state(avg_buy_price=avg_buy)
+                        save_entry_price(avg_buy)
+                        send_telegram(
+                            f"⚠️ WARNING: avg_buy seeded to current price Rs.{avg_buy:,.2f} "
+                            f"because CoinDCX trade history reconciliation failed. Your real "
+                            f"cost basis may be wrong — check manually before trusting the next sell."
+                        )
 
             # Find which sell stage to attempt next
             next_sell = sell_stage + 1
@@ -3128,6 +3336,20 @@ def check_auto_trading(price_inr: float):
                 last_sell_px = last_inr_value if last_inr_value > 0 else 0
                 if last_sell_px > 0:
                     save_dca_state(last_sell_price_btc=last_sell_px)
+
+            # If STILL zero, check CoinDCX directly before assuming this is
+            # genuinely a first-ever trade — a DB reset can wipe local
+            # history while the real last sell still exists on the exchange.
+            if last_sell_px == 0:
+                _ex_last_sell, _ex_has_trades = get_last_sell_price_from_exchange()
+                if _ex_last_sell > 0:
+                    last_sell_px = _ex_last_sell
+                    save_dca_state(last_sell_price_btc=last_sell_px)
+                    send_telegram(
+                        f"🔄 DB showed no sell history, but CoinDCX shows a real "
+                        f"last sell at Rs.{last_sell_px:,.2f} — using that instead "
+                        f"of treating this as a first-ever trade."
+                    )
 
             is_first_trade = (last_sell_px == 0 and next_buy == 1)
 
@@ -3536,6 +3758,18 @@ if not is_live():
             save_peak_price(price_inr)
         update_wallet_daily_summary()
         st.success("✅ Test wallet reset | BTC: 0.005 | INR: ₹5,000 | Entry price seeded")
+
+    st.caption(
+        "If avg buy / stage state ever looks wrong (e.g. after a DB reset), "
+        "use this to rebuild it from your real CoinDCX trade history instead "
+        "of guessing from the current price."
+    )
+    if st.button("🔄 Resync State from CoinDCX (fixes lost avg-buy after DB reset)"):
+        _RESYNC_BUY_STAGES  = [(2.8, 0.10), (3.5, 0.25), (4.0, 0.50)]
+        _RESYNC_SELL_STAGES = [(3.5, 0.25), (4.5, 0.35), (5.5, 0.40)]
+        with st.spinner("Fetching real trade history from CoinDCX..."):
+            _report = resync_and_report(price_inr or 0, _RESYNC_BUY_STAGES, _RESYNC_SELL_STAGES)
+        st.code(_report)
 
 # ── Trading Panel ──
 autotrade_active = get_autotrade_active_from_db()
