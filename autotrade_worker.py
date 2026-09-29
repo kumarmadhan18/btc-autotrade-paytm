@@ -110,7 +110,7 @@ DEFAULT_DAILY_LOSS_LIMIT = 5.0
 # ── DCA Stage Config ──────────────────────────────────────────────────────────
 # BUY stages  → triggered when price drops X% below last sell price
 #               each stage spends Y% of total INR balance
-BUY_STAGES  = [(2.8, 0.10), (3.5, 0.25), (4.0, 0.50)]  # (dip_pct, inr_fraction)
+BUY_STAGES  = [(2.8, 0.50), (3.5, 0.25), (4.0, 0.10)]  # (dip_pct, inr_fraction)
 INR_RESERVE = 0.15   # always keep 15% of INR in reserve
 
 # SELL stages → triggered when price rises X% above LATEST BUY price
@@ -1549,9 +1549,9 @@ def run_trade_cycle(price_inr: float):
     # STATE B — Holding INR → STAGED DCA BUY
     #
     #   ALL BUY STAGES wait for price to dip from last sell price:
-    #     B1: price <= last_sell * (1 - 2.8%) → spend 10% of INR
+    #     B1: price <= last_sell * (1 - 2.8%) → spend 50% of INR
     #     B2: price <= last_sell * (1 - 3.5%) → spend 25% of INR
-    #     B3: price <= last_sell * (1 - 4.0%) → spend 50% of INR
+    #     B3: price <= last_sell * (1 - 4.0%) → spend 10% of INR
     #     Reserve: always keep 15% of INR
     #   EXCEPTION: very first trade ever (no sell history) → B1 fires immediately
     #
@@ -1563,9 +1563,9 @@ def run_trade_cycle(price_inr: float):
         # ALL buy stages wait for price to dip below last sell price.
         # Exception: very first trade ever (no last_sell_px at all) fires immediately.
         #
-        # B1: price <= last_sell * (1 - 2.8%) → spend 10% INR
+        # B1: price <= last_sell * (1 - 2.8%) → spend 50% INR
         # B2: price <= last_sell * (1 - 3.5%) → spend 25% INR
-        # B3: price <= last_sell * (1 - 4.0%) → spend 50% INR
+        # B3: price <= last_sell * (1 - 4.0%) → spend 10% INR
         # Reserve: 15% INR always kept back
         next_buy = buy_stage + 1
 
@@ -1725,7 +1725,7 @@ def main():
     send_telegram(
         "Auto-Trade Worker started - DCA Strategy\n"
         "BUY:  B1=-2.8% | B2=-3.5% | B3=-4.0% from last sell price\n"
-        "      INR split: B1=10% B2=25% B3=50% | Reserve=15%\n"
+        "      INR split: B1=50% B2=25% B3=10% | Reserve=15%\n"
         "      Exception: B1 fires immediately on very first trade only\n"
         "SELL: S1=+2.8% | S2=+3.5% | S3=+4.0% from latest buy price\n"
         "      BTC split: S1=25% S2=35% S3=40%\n"

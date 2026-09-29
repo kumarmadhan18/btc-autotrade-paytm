@@ -3031,7 +3031,7 @@ def check_auto_trading(price_inr: float):
 
         # ── DCA Stage Config ─────────────────────────────────────
         # BUY stages  (% dip from last sell price → % of INR to deploy)
-        BUY_STAGES  = [(2.8, 0.10), (3.5, 0.25), (4.0, 0.50)]  # (dip%, inr_pct)
+        BUY_STAGES  = [(2.8, 0.50), (3.5, 0.25), (4.0, 0.10)]  # (dip%, inr_pct)
         INR_RESERVE = 0.15  # 15% always held back
 
         # SELL stages (% rise from avg buy price → % of BTC to sell)
@@ -3321,9 +3321,9 @@ def check_auto_trading(price_inr: float):
             # ALL buy stages wait for price to dip from last sell price.
             # Exception: very first trade ever (no last_sell_px) fires B1 immediately.
             #
-            # B1: price <= last_sell * (1 - 2.8%) → spend 10% INR
+            # B1: price <= last_sell * (1 - 2.8%) → spend 50% INR
             # B2: price <= last_sell * (1 - 3.5%) → spend 25% INR
-            # B3: price <= last_sell * (1 - 4.0%) → spend 50% INR
+            # B3: price <= last_sell * (1 - 4.0%) → spend 10% INR
             next_buy = buy_stage + 1
 
             if next_buy > len(BUY_STAGES):
@@ -3765,7 +3765,7 @@ if not is_live():
         "of guessing from the current price."
     )
     if st.button("🔄 Resync State from CoinDCX (fixes lost avg-buy after DB reset)"):
-        _RESYNC_BUY_STAGES  = [(2.8, 0.10), (3.5, 0.25), (4.0, 0.50)]
+        _RESYNC_BUY_STAGES  = [(2.8, 0.50), (3.5, 0.25), (4.0, 0.10)]
         _RESYNC_SELL_STAGES = [(3.5, 0.25), (4.5, 0.35), (5.5, 0.40)]
         with st.spinner("Fetching real trade history from CoinDCX..."):
             _report = resync_and_report(price_inr or 0, _RESYNC_BUY_STAGES, _RESYNC_SELL_STAGES)
