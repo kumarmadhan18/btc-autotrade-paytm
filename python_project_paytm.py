@@ -791,11 +791,29 @@ def usd_to_inr(usd):
 # Calls /exchange/v1/users/balances directly.
 # Returns a dict keyed by currency, e.g. {"INR": 5000.0, "BTC": 0.0012}
 # ─────────────────────────────────────────
+# Diagnostic: records WHY the last balance fetch returned empty so the UI can
+# tell the difference between "API failed" and "wallet genuinely empty".
+_LAST_BALANCE_DIAG = {"ok": None, "detail": "not called yet", "raw_count": 0}
+
+
 def _fetch_coindcx_balances() -> dict:
     """
     Fetches all wallet balances from CoinDCX via authenticated API.
     Returns dict like {"INR": 5000.0, "BTC": 0.00123, ...} or {} on failure.
+    Also records a diagnostic in _LAST_BALANCE_DIAG for the UI.
     """
+    global _LAST_BALANCE_DIAG
+    # Missing credentials is the #1 cause of a "0 balance" on a service that
+    # otherwise runs fine — surface it instead of silently returning {}.
+    if not API_KEY or not API_SECRET:
+        _LAST_BALANCE_DIAG = {
+            "ok": False,
+            "detail": "COINDCX_API_KEY / COINDCX_API_SECRET not set in this "
+                      "service's environment.",
+            "raw_count": 0,
+        }
+        print("❌ CoinDCX balance fetch: API key/secret missing in env.")
+        return {}
     try:
         timestamp_ms = str(int(time.time() * 1000))
         body = json.dumps({"timestamp": timestamp_ms}, separators=(",", ":"))
@@ -815,6 +833,19 @@ def _fetch_coindcx_balances() -> dict:
             headers=headers,
             timeout=10
         )
+        if not resp.ok:
+            # Capture the server's reason (bad key, IP block, etc.)
+            try:
+                err_body = resp.json()
+            except Exception:
+                err_body = resp.text[:200]
+            _LAST_BALANCE_DIAG = {
+                "ok": False,
+                "detail": f"HTTP {resp.status_code} {resp.reason} from CoinDCX: {err_body}",
+                "raw_count": 0,
+            }
+            print(f"❌ CoinDCX balances HTTP {resp.status_code}: {err_body}")
+            return {}
         resp.raise_for_status()
         balances = {}
         for item in resp.json():
@@ -831,8 +862,19 @@ def _fetch_coindcx_balances() -> dict:
             locked = float(item.get("locked_balance", 0.0) or 0.0)
             balances[currency] = free + locked
             balances[f"{currency}_available"] = free
+        _LAST_BALANCE_DIAG = {
+            "ok": True,
+            "detail": f"OK — {len([k for k in balances if '_available' not in k])} "
+                      f"currencies returned.",
+            "raw_count": len(balances),
+        }
         return balances
     except Exception as e:
+        _LAST_BALANCE_DIAG = {
+            "ok": False,
+            "detail": f"Request failed: {type(e).__name__}: {e}",
+            "raw_count": 0,
+        }
         print(f"❌ CoinDCX balance fetch failed: {e}")
         return {}
 
@@ -4025,6 +4067,40 @@ with wallet_col2:
     st.metric("INR Wallet Balance", f"₹{_inr:,.2f}")
     total_value = _inr + (_btc * (price_inr or 0))
     st.metric("Total Portfolio",    f"₹{total_value:,.2f}")
+
+# ── Balance diagnostics ───────────────────────────────────────────────
+# When balances read as 0 we must distinguish "API failed / mis-configured"
+# from "wallet genuinely empty". This panel exposes the real reason on the
+# deployed Render service (where print() logs are hard to see).
+with st.expander("🔍 Balance diagnostics (why is my balance showing?)",
+                 expanded=(is_live() and _inr == 0 and _btc == 0)):
+    st.write(f"- **Mode (is_live):** `{is_live()}`  |  APP_ENV=`{APP_ENV}`  |  "
+             f"REAL_TRADING=`{REAL_TRADING}`")
+    st.write(f"- **API key present:** `{bool(API_KEY)}` (len={len(API_KEY)})  |  "
+             f"**API secret present:** `{bool(API_SECRET)}` (len={len(API_SECRET)})")
+    if is_live():
+        _diag = _fetch_coindcx_balances()  # refresh + populate _LAST_BALANCE_DIAG
+        d = _LAST_BALANCE_DIAG
+        if d.get("ok"):
+            st.success(f"CoinDCX API OK — {d.get('detail')}")
+            st.write({k: v for k, v in _diag.items() if "_available" not in k})
+        else:
+            st.error(f"CoinDCX API problem: {d.get('detail')}")
+            st.info(
+                "Most common fixes:\n"
+                "1. Set COINDCX_API_KEY and COINDCX_API_SECRET on THIS Streamlit "
+                "service (not just the worker).\n"
+                "2. In the CoinDCX API key settings, whitelist Render's outbound "
+                "IP — or disable IP restriction — because the UI service may use "
+                "a different IP than the worker.\n"
+                "3. Ensure the key has 'Read Balance' permission enabled."
+            )
+    else:
+        st.warning(
+            "App is in TEST mode, so balances come from the local DB, not "
+            "CoinDCX. Set APP_ENV=live and REAL_TRADING=true on this service "
+            "to show your real CoinDCX wallet."
+        )
 
 # ── Auto-Trade State Restore ──
 db_active = get_autotrade_active_from_db()
