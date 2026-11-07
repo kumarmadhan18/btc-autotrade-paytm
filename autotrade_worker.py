@@ -350,10 +350,19 @@ def _fetch_coindcx_balances(retries: int = 3) -> dict | None:
                 data=body, headers=headers, timeout=10
             )
             resp.raise_for_status()
-            return {
-                item.get("currency", "").upper(): float(item.get("balance", 0.0))
-                for item in resp.json() if item.get("currency")
-            }
+            out = {}
+            for item in resp.json():
+                cur = item.get("currency", "").upper()
+                if not cur:
+                    continue
+                free   = float(item.get("balance", 0.0) or 0.0)
+                locked = float(item.get("locked_balance", 0.0) or 0.0)
+                # Headline balance = total (free + in-order) so status/resync
+                # reports match the CoinDCX wallet. Trading logic that needs
+                # only spendable funds uses the "<CUR>_available" key.
+                out[cur] = free + locked
+                out[f"{cur}_available"] = free
+            return out
         except Exception as e:
             last_err = e
             if attempt < retries - 1:
@@ -1059,7 +1068,8 @@ def get_last_auto_trade() -> dict | None:
 def get_current_inr_balance() -> float:
     if REAL_TRADING:
         balances = _fetch_coindcx_balances()
-        return float((balances or {}).get("INR", 0.0))
+        # Spendable INR only — funds locked in an open order can't fund a buy.
+        return float((balances or {}).get("INR_available", (balances or {}).get("INR", 0.0)))
     conn = get_db()
     if not conn:
         return 0.0
@@ -1075,7 +1085,8 @@ def get_current_inr_balance() -> float:
 def get_current_btc_balance() -> float:
     if REAL_TRADING:
         balances = _fetch_coindcx_balances()
-        return float((balances or {}).get("BTC", 0.0))
+        # Sellable BTC only — BTC locked in an open sell order can't be resold.
+        return float((balances or {}).get("BTC_available", (balances or {}).get("BTC", 0.0)))
     conn = get_db()
     if not conn:
         return 0.0
@@ -1106,7 +1117,12 @@ def get_live_balances() -> tuple[float, float, bool]:
     balances = _fetch_coindcx_balances()
     if balances is None:
         return 0.0, 0.0, False
-    return float(balances.get("INR", 0.0)), float(balances.get("BTC", 0.0)), True
+    # Trading decisions use spendable (free) funds, not funds locked in orders.
+    return (
+        float(balances.get("INR_available", balances.get("INR", 0.0))),
+        float(balances.get("BTC_available", balances.get("BTC", 0.0))),
+        True,
+    )
 
 
 def log_wallet_transaction(action, amount, balance, price_inr, trade_type):

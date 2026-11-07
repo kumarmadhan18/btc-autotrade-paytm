@@ -819,9 +819,18 @@ def _fetch_coindcx_balances() -> dict:
         balances = {}
         for item in resp.json():
             currency = item.get("currency", "").upper()
-            balance  = float(item.get("balance", 0.0))
-            if currency:
-                balances[currency] = balance
+            if not currency:
+                continue
+            # CoinDCX returns both the free ("balance") and the in-order
+            # ("locked_balance") portions. The dashboard was only reading the
+            # free part, so whenever the bot had an open limit order the
+            # displayed INR/BTC looked smaller than the real wallet total.
+            # Report the TOTAL (free + locked) as the headline balance and keep
+            # the free amount under a "<CUR>_available" key for spend checks.
+            free   = float(item.get("balance", 0.0) or 0.0)
+            locked = float(item.get("locked_balance", 0.0) or 0.0)
+            balances[currency] = free + locked
+            balances[f"{currency}_available"] = free
         return balances
     except Exception as e:
         print(f"❌ CoinDCX balance fetch failed: {e}")
@@ -971,7 +980,9 @@ def get_current_inr_balance():
     """
     if is_live():
         balances = _fetch_coindcx_balances()
-        return float(balances.get("INR", 0.0))
+        # Spendable INR = free balance only (funds locked in open orders can't
+        # be used for a new buy). Fall back to total if _available is absent.
+        return float(balances.get("INR_available", balances.get("INR", 0.0)))
 
     # TEST mode — DB fallback
     conn = get_mysql_connection()
@@ -1010,7 +1021,9 @@ def get_btc_wallet_balance() -> float:
         return st.session_state.get("test_btc_balance", 0.0)
 
     balances = _fetch_coindcx_balances()
-    btc_balance = float(balances.get("BTC", 0.0))
+    # Sellable BTC = free balance only (BTC locked in an open sell order can't
+    # be sold again). Fall back to total if _available is absent.
+    btc_balance = float(balances.get("BTC_available", balances.get("BTC", 0.0)))
     print(f"✅ BTC Wallet balance from CoinDCX → {btc_balance:.8f} BTC")
     return btc_balance
 
@@ -3488,8 +3501,20 @@ _env_real_trading = os.getenv("REAL_TRADING", "false").lower() in ("1", "true", 
 
 if APP_ENV == "live":
     REAL_TRADING = _env_real_trading
+    # CRITICAL: is_live() reads st.session_state["REAL_TRADING"] first and only
+    # falls back to the module global. When the env locks the mode we must seed
+    # session_state too, otherwise is_live() can disagree with the locked mode
+    # and silently route balance reads to the local DB (TEST) instead of CoinDCX.
+    st.session_state["REAL_TRADING"] = REAL_TRADING
     mode_label   = "🔴 LIVE" if REAL_TRADING else "🟡 TEST"
     st.sidebar.markdown(f"**Mode:** {mode_label} *(locked by environment)*")
+    if not REAL_TRADING:
+        st.sidebar.warning(
+            "⚠️ REAL_TRADING is not 'true' on this service, so the dashboard "
+            "shows local DB balances, not your live CoinDCX wallet. Set "
+            "REAL_TRADING=true (and APP_ENV=live) on the Streamlit service to "
+            "match the worker."
+        )
 else:
     st.session_state.setdefault("REAL_TRADING", False)
     REAL_TRADING = (
