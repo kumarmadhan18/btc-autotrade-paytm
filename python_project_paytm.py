@@ -879,6 +879,95 @@ def _fetch_coindcx_balances() -> dict:
         return {}
 
 
+def _get_last_known_balances_from_db() -> dict:
+    """
+    Reads the most recent BTC and INR balances recorded in the DB from prior
+    live trades/syncs. Used as a FALLBACK for the dashboard display when the
+    live CoinDCX fetch fails (e.g. expired API key) so the UI shows the last
+    good numbers instead of blank zeros.
+
+    Returns {"BTC": float, "INR": float, "ts": float|None}.
+    """
+    out = {"BTC": 0.0, "INR": 0.0, "ts": None}
+    conn = get_mysql_connection()
+    if not conn:
+        return out
+    try:
+        cursor = get_cursor(conn)
+        # Latest BTC balance from any recorded trade
+        try:
+            cursor.execute(f"""
+                SELECT balance_after, {epoch_sql('trade_time')} AS ts
+                FROM wallet_transactions
+                WHERE balance_after IS NOT NULL
+                ORDER BY trade_time DESC LIMIT 1
+            """)
+            row = cursor.fetchone()
+            if row:
+                out["BTC"] = float(row.get("balance_after") or 0.0)
+                out["ts"]  = float(row.get("ts") or 0.0) or None
+        except Exception:
+            pass
+        # Latest INR balance from any recorded transaction
+        try:
+            cursor.execute("""
+                SELECT balance_after FROM inr_wallet_transactions
+                WHERE balance_after IS NOT NULL
+                ORDER BY trade_time DESC LIMIT 1
+            """)
+            row = cursor.fetchone()
+            if row:
+                out["INR"] = float(row.get("balance_after") or 0.0)
+        except Exception:
+            pass
+        return out
+    except Exception as e:
+        print(f"❌ _get_last_known_balances_from_db error: {e}")
+        return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def get_display_balances() -> dict:
+    """
+    Balances for the dashboard WALLET STATUS panel.
+
+    Tries CoinDCX live first. If that fails in live mode (expired/invalid key,
+    network error, etc.), falls back to the last-known-good balances stored in
+    the DB and marks them stale so the UI can warn the user instead of showing
+    a misleading zero.
+
+    Returns {"BTC": float, "INR": float, "stale": bool, "reason": str}.
+    """
+    if not is_live():
+        btc, _ = get_last_wallet_balance(mode="TEST")
+        inr, _ = get_last_inr_balance(mode="TEST")
+        return {"BTC": float(btc or 0.0), "INR": float(inr or 0.0),
+                "stale": False, "reason": "test mode"}
+
+    balances = _fetch_coindcx_balances()
+    if balances and ("INR" in balances or "BTC" in balances):
+        return {
+            "BTC":   float(balances.get("BTC", 0.0)),
+            "INR":   float(balances.get("INR", 0.0)),
+            "stale": False,
+            "reason": "live",
+        }
+
+    # Live fetch failed — fall back to last known DB values.
+    last = _get_last_known_balances_from_db()
+    reason = (_LAST_BALANCE_DIAG or {}).get("detail", "live balance fetch failed")
+    return {
+        "BTC":   float(last.get("BTC", 0.0)),
+        "INR":   float(last.get("INR", 0.0)),
+        "stale": True,
+        "reason": reason,
+    }
+
+
 # ─────────────────────────────────────────
 # Wallet Balance Helpers  (now live from CoinDCX API)
 # ─────────────────────────────────────────
@@ -4044,17 +4133,20 @@ with col3:
 st.write("### 💼 Wallet Status")
 wallet_col1, wallet_col2 = st.columns(2)
 
-# Always read fresh from DB — session_state is reset on every page refresh
-# so it shows zeros after auto-trade updates. DB is always source of truth.
-_btc_raw, _ = get_last_wallet_balance(mode="LIVE" if is_live() else "TEST")
-_inr_raw, _ = get_last_inr_balance(mode="LIVE"   if is_live() else "TEST")
+# Use get_display_balances(): live CoinDCX first, and if that fails in live
+# mode (e.g. expired API key) fall back to the last-known-good DB values and
+# flag them stale — so the dashboard never shows a misleading blank zero.
+_disp = get_display_balances()
+_btc  = float(_disp.get("BTC", 0.0) or 0.0)
+_inr  = float(_disp.get("INR", 0.0) or 0.0)
 
-# Fallback: if no trade rows yet, try current balance tables
-if not _inr_raw:
-    _inr_raw = get_current_inr_balance()
-
-_btc = float(_btc_raw or 0)
-_inr = float(_inr_raw or 0) if not isinstance(_inr_raw, tuple) else float(_inr_raw[0] or 0)
+if _disp.get("stale"):
+    st.warning(
+        "⚠️ Showing LAST-KNOWN balances from the database — live CoinDCX fetch "
+        f"failed. Reason: {_disp.get('reason')}\n\n"
+        "These numbers may be out of date. Fix the API key (see the Balance "
+        "diagnostics panel below) to resume live balances."
+    )
 
 # Sync globals so rest of page uses same values
 BTC_WALLET["balance"] = _btc

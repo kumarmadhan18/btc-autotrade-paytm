@@ -285,6 +285,43 @@ def poll_telegram_commands() -> list:
 # ─────────────────────────────────────────
 # CoinDCX API
 # ─────────────────────────────────────────
+# Throttle for expired/invalid-key alerts so we notify ONCE per hour instead
+# of every 30-second cycle.
+_last_key_alert_ts = 0.0
+KEY_ALERT_INTERVAL = 3600  # seconds
+
+
+def _is_api_key_error(status_code: int, err_body) -> bool:
+    """True when CoinDCX rejected us for an expired / invalid / unauthorized key."""
+    text = str(err_body).lower()
+    if status_code in (401, 403):
+        return True
+    # 422 with an auth-ish message (CoinDCX returns 422 for "API key expired")
+    if status_code == 422 and any(
+        kw in text for kw in ("api key", "expired", "invalid key",
+                               "unauthorized", "generate new")
+    ):
+        return True
+    return False
+
+
+def _alert_api_key_problem(detail: str):
+    """Send a throttled Telegram alert that the API key is expired/invalid."""
+    global _last_key_alert_ts
+    now = time.time()
+    if now - _last_key_alert_ts < KEY_ALERT_INTERVAL:
+        return
+    _last_key_alert_ts = now
+    log(f"🔑❌ CoinDCX API key problem: {detail}")
+    send_telegram(
+        "🔑❌ CoinDCX API KEY PROBLEM — trading is STALLED.\n"
+        f"{detail}\n\n"
+        "Fix: generate a new CoinDCX API key + secret, then update "
+        "COINDCX_API_KEY and COINDCX_API_SECRET on BOTH the worker and the "
+        "Streamlit service on Render and restart them."
+    )
+
+
 def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
     if not API_KEY or not API_SECRET:
         raise ValueError("COINDCX_API_KEY and COINDCX_API_SECRET must be set.")
@@ -306,6 +343,8 @@ def _coindcx_signed_request(endpoint: str, body: dict) -> dict:
             err = resp.json()
         except Exception:
             err = resp.text
+        if _is_api_key_error(resp.status_code, err):
+            _alert_api_key_problem(f"HTTP {resp.status_code} on {endpoint}: {err}")
         raise requests.exceptions.HTTPError(
             f"{resp.status_code} {resp.reason} | CoinDCX: {err} | body: {payload}",
             response=resp
@@ -349,7 +388,19 @@ def _fetch_coindcx_balances(retries: int = 3) -> dict | None:
                 f"{BASE_URL}/exchange/v1/users/balances",
                 data=body, headers=headers, timeout=10
             )
-            resp.raise_for_status()
+            if not resp.ok:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text[:200]
+                # Expired/invalid key → alert once, and stop retrying since
+                # retries can never fix an expired key.
+                if _is_api_key_error(resp.status_code, err_body):
+                    _alert_api_key_problem(
+                        f"HTTP {resp.status_code} on balances: {err_body}"
+                    )
+                    return None
+                resp.raise_for_status()
             out = {}
             for item in resp.json():
                 cur = item.get("currency", "").upper()
