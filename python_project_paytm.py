@@ -814,69 +814,93 @@ def _fetch_coindcx_balances() -> dict:
         }
         print("❌ CoinDCX balance fetch: API key/secret missing in env.")
         return {}
-    try:
-        timestamp_ms = str(int(time.time() * 1000))
-        body = json.dumps({"timestamp": timestamp_ms}, separators=(",", ":"))
-        signature = hmac.new(
-            API_SECRET.encode("utf-8"),
-            body.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-        headers = {
-            "Content-Type": "application/json",
-            "X-AUTH-APIKEY": API_KEY,
-            "X-AUTH-SIGNATURE": signature,
-        }
-        resp = requests.post(
-            f"{BASE_URL}/exchange/v1/users/balances",
-            data=body,
-            headers=headers,
-            timeout=10
-        )
-        if not resp.ok:
-            # Capture the server's reason (bad key, IP block, etc.)
-            try:
-                err_body = resp.json()
-            except Exception:
-                err_body = resp.text[:200]
-            _LAST_BALANCE_DIAG = {
-                "ok": False,
-                "detail": f"HTTP {resp.status_code} {resp.reason} from CoinDCX: {err_body}",
-                "raw_count": 0,
+    errors = []
+    # Same host + signing the worker uses for trade_history (which works):
+    # apigw first with an INTEGER timestamp, legacy api.coindcx.com fallback.
+    for host in (SPOT_URL, BASE_URL):
+        try:
+            body = json.dumps({"timestamp": int(time.time() * 1000)},
+                              separators=(",", ":"))
+            signature = hmac.new(
+                API_SECRET.encode("utf-8"),
+                body.encode("utf-8"),
+                hashlib.sha256
+            ).hexdigest()
+            headers = {
+                "Content-Type": "application/json",
+                "X-AUTH-APIKEY": API_KEY,
+                "X-AUTH-SIGNATURE": signature,
             }
-            print(f"❌ CoinDCX balances HTTP {resp.status_code}: {err_body}")
-            return {}
-        resp.raise_for_status()
-        balances = {}
-        for item in resp.json():
-            currency = item.get("currency", "").upper()
-            if not currency:
+            resp = requests.post(
+                f"{host}/exchange/v1/users/balances",
+                data=body,
+                headers=headers,
+                timeout=10
+            )
+            if not resp.ok:
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text[:200]
+                errors.append(f"{host} → HTTP {resp.status_code} {resp.reason}: {err_body}")
+                print(f"❌ CoinDCX balances {errors[-1]}")
                 continue
-            # CoinDCX returns both the free ("balance") and the in-order
-            # ("locked_balance") portions. The dashboard was only reading the
-            # free part, so whenever the bot had an open limit order the
-            # displayed INR/BTC looked smaller than the real wallet total.
-            # Report the TOTAL (free + locked) as the headline balance and keep
-            # the free amount under a "<CUR>_available" key for spend checks.
-            free   = float(item.get("balance", 0.0) or 0.0)
-            locked = float(item.get("locked_balance", 0.0) or 0.0)
-            balances[currency] = free + locked
-            balances[f"{currency}_available"] = free
-        _LAST_BALANCE_DIAG = {
-            "ok": True,
-            "detail": f"OK — {len([k for k in balances if '_available' not in k])} "
-                      f"currencies returned.",
-            "raw_count": len(balances),
-        }
-        return balances
-    except Exception as e:
-        _LAST_BALANCE_DIAG = {
-            "ok": False,
-            "detail": f"Request failed: {type(e).__name__}: {e}",
-            "raw_count": 0,
-        }
-        print(f"❌ CoinDCX balance fetch failed: {e}")
-        return {}
+
+            balances = _parse_coindcx_balances(resp.json())
+            if balances is None:
+                errors.append(f"{host} → unexpected response shape: {resp.text[:200]}")
+                print(f"❌ CoinDCX balances {errors[-1]}")
+                continue
+
+            _LAST_BALANCE_DIAG = {
+                "ok": True,
+                "detail": f"OK via {host} — "
+                          f"{len([k for k in balances if '_available' not in k])} "
+                          f"currencies returned.",
+                "raw_count": len(balances),
+            }
+            return balances
+        except Exception as e:
+            errors.append(f"{host} → {type(e).__name__}: {e}")
+            print(f"❌ CoinDCX balance fetch failed: {errors[-1]}")
+
+    _LAST_BALANCE_DIAG = {
+        "ok": False,
+        "detail": " | ".join(errors) or "unknown error",
+        "raw_count": 0,
+    }
+    return {}
+
+
+def _parse_coindcx_balances(data):
+    """
+    Turns a CoinDCX balances response into
+    {"INR": total, "INR_available": free, "BTC": total, "BTC_available": free, ...}.
+
+    Total = free ("balance") + in-order ("locked_balance"), used for display.
+    *_available = free only, used for spend checks.
+    Accepts a plain list, or a dict wrapping it under balances/data/result.
+    Returns None for an unrecognised shape (never a fake zero).
+    """
+    rows = data
+    if isinstance(data, dict):
+        rows = data.get("balances") or data.get("data") or data.get("result")
+    if not isinstance(rows, list):
+        return None
+
+    balances = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        currency = str(item.get("currency") or item.get("currency_short_name")
+                       or item.get("asset") or "").upper()
+        if not currency:
+            continue
+        free   = float(item.get("balance", item.get("available_balance", 0.0)) or 0.0)
+        locked = float(item.get("locked_balance", 0.0) or 0.0)
+        balances[currency] = free + locked
+        balances[f"{currency}_available"] = free
+    return balances
 
 
 def _get_last_known_balances_from_db() -> dict:

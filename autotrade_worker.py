@@ -369,58 +369,91 @@ def _fetch_coindcx_balances(retries: int = 3) -> dict | None:
     None != {} — None means "API call failed, don't trust this",
     {} or balances with 0 means "API succeeded, balance really is 0".
     """
+    if not API_KEY or not API_SECRET:
+        log("❌ Balance fetch: COINDCX_API_KEY / COINDCX_API_SECRET not set.")
+        return None
+
     last_err = None
     for attempt in range(retries):
-        try:
-            timestamp_ms = str(int(time.time() * 1000))
-            body = json.dumps({"timestamp": timestamp_ms}, separators=(",", ":"))
-            signature = hmac.new(
-                API_SECRET.encode("utf-8"),
-                body.encode("utf-8"),
-                hashlib.sha256
-            ).hexdigest()
-            headers = {
-                "Content-Type":     "application/json",
-                "X-AUTH-APIKEY":    API_KEY,
-                "X-AUTH-SIGNATURE": signature,
-            }
-            resp = requests.post(
-                f"{BASE_URL}/exchange/v1/users/balances",
-                data=body, headers=headers, timeout=10
-            )
-            if not resp.ok:
-                try:
-                    err_body = resp.json()
-                except Exception:
-                    err_body = resp.text[:200]
-                # Expired/invalid key → alert once, and stop retrying since
-                # retries can never fix an expired key.
-                if _is_api_key_error(resp.status_code, err_body):
-                    _alert_api_key_problem(
-                        f"HTTP {resp.status_code} on balances: {err_body}"
-                    )
-                    return None
-                resp.raise_for_status()
-            out = {}
-            for item in resp.json():
-                cur = item.get("currency", "").upper()
-                if not cur:
+        # Same host + signing as trade_history (which works): apigw first,
+        # legacy api.coindcx.com only as a fallback.
+        for host in (SPOT_URL, BASE_URL):
+            try:
+                body = json.dumps({"timestamp": int(time.time() * 1000)},
+                                  separators=(",", ":"))
+                signature = hmac.new(
+                    API_SECRET.encode("utf-8"),
+                    body.encode("utf-8"),
+                    hashlib.sha256
+                ).hexdigest()
+                headers = {
+                    "Content-Type":     "application/json",
+                    "X-AUTH-APIKEY":    API_KEY,
+                    "X-AUTH-SIGNATURE": signature,
+                }
+                resp = requests.post(
+                    f"{host}/exchange/v1/users/balances",
+                    data=body, headers=headers, timeout=10
+                )
+                if not resp.ok:
+                    try:
+                        err_body = resp.json()
+                    except Exception:
+                        err_body = resp.text[:200]
+                    # Expired/invalid key → alert once and stop; retries can't fix it.
+                    if _is_api_key_error(resp.status_code, err_body):
+                        _alert_api_key_problem(
+                            f"HTTP {resp.status_code} on balances ({host}): {err_body}"
+                        )
+                        return None
+                    last_err = f"HTTP {resp.status_code} from {host}: {err_body}"
+                    log(f"⚠️ Balance fetch {last_err}")
+                    continue  # try the next host
+
+                out = parse_coindcx_balances(resp.json())
+                if out is None:
+                    last_err = f"unexpected balances shape from {host}: {resp.text[:200]}"
+                    log(f"⚠️ {last_err}")
                     continue
-                free   = float(item.get("balance", 0.0) or 0.0)
-                locked = float(item.get("locked_balance", 0.0) or 0.0)
-                # Headline balance = total (free + in-order) so status/resync
-                # reports match the CoinDCX wallet. Trading logic that needs
-                # only spendable funds uses the "<CUR>_available" key.
-                out[cur] = free + locked
-                out[f"{cur}_available"] = free
-            return out
-        except Exception as e:
-            last_err = e
-            if attempt < retries - 1:
-                time.sleep(2)  # brief pause before retry
+                return out
+            except Exception as e:
+                last_err = f"{host}: {type(e).__name__}: {e}"
+        if attempt < retries - 1:
+            time.sleep(2)  # brief pause before retry
 
     log(f"❌ Balance fetch failed after {retries} attempts: {last_err}")
     return None
+
+
+def parse_coindcx_balances(data) -> dict | None:
+    """
+    Turns a CoinDCX balances response into
+    {"INR": total, "INR_available": free, "BTC": total, "BTC_available": free, ...}.
+
+    Accepts a plain list of rows, or a dict wrapping the list under
+    "balances"/"data"/"result". Returns None for an unrecognised shape so
+    callers never mistake a bad response for a real zero balance.
+    """
+    rows = data
+    if isinstance(data, dict):
+        rows = data.get("balances") or data.get("data") or data.get("result")
+    if not isinstance(rows, list):
+        return None
+
+    out = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        cur = str(item.get("currency") or item.get("currency_short_name")
+                  or item.get("asset") or "").upper()
+        if not cur:
+            continue
+        free   = float(item.get("balance", item.get("available_balance", 0.0)) or 0.0)
+        locked = float(item.get("locked_balance", 0.0) or 0.0)
+        # Headline balance = total (free + in-order); trading uses *_available.
+        out[cur] = free + locked
+        out[f"{cur}_available"] = free
+    return out
 
 
 def _cancel_order(order_id: str):
@@ -621,8 +654,20 @@ def resync_and_report(price_inr: float) -> str:
     sell_stage   = recon["sell_stage"]
     last_sell_px = recon["last_sell_price"]
 
+    bals = _fetch_coindcx_balances()
+    if bals is None:
+        bal_line = "Wallet     : balance fetch FAILED (check worker logs)"
+    else:
+        bal_line = (
+            f"Wallet     : INR Rs.{bals.get('INR', 0.0):,.2f} "
+            f"(free Rs.{bals.get('INR_available', 0.0):,.2f}) | "
+            f"BTC {bals.get('BTC', 0.0):.6f} "
+            f"(free {bals.get('BTC_available', 0.0):.6f})"
+        )
+
     lines = [
         f"RESYNC COMPLETE (from last {recon['trades_seen']} CoinDCX fills)",
+        bal_line,
         f"Real avg buy price : Rs.{avg_buy:,.2f}" if avg_buy > 0 else "Real avg buy price : none (no open position)",
         f"Buy stage  : {buy_stage}/3",
         f"Sell stage : {sell_stage}/3",
